@@ -1,0 +1,9 @@
+{
+  "grid_size": 6,
+  "tile_2_probability": 0.9,
+  "initial_tiles": 2,
+  "random_seed": null,
+  "cell_size": 100,
+  "cell_padding": 10,
+  "animation_speed": 10
+}
