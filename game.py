@@ -18,6 +18,15 @@ Typical agent usage::
         action = my_agent.choose(state)
         valid, reward = game.move(action)
 
+Typical MCTS / search agent usage::
+
+    # Clone the game state for simulation — no side effects on the real game
+    sim = game.clone()
+    sim.move(Action.LEFT)
+
+    # Or construct from a raw board for arbitrary state evaluation
+    sim = Game2048.from_state(some_board, score=1200)
+
 Typical human usage::
 
     python game_2048.py              # reads config.json
@@ -52,6 +61,10 @@ class Game2048:
     This class manages the board state, move execution, tile spawning,
     scoring, and game-over detection. It exposes a clean API for agents
     to query state, execute actions, and receive rewards.
+
+    Supports cheap cloning via ``clone()`` and ``from_state()`` so that
+    search-based agents (MCTS, expectimax, minimax, etc.) can simulate
+    moves without affecting the real game.
 
     Attributes:
         grid_size (int): Side length of the square board (e.g. 4 for 4×4).
@@ -91,6 +104,82 @@ class Game2048:
 
         for _ in range(self.initial_tiles):
             self._add_random_tile()
+
+    # ─── Cloning / state construction ─────────────────────────────
+
+    @classmethod
+    def from_state(cls, board: np.ndarray, score: int = 0,
+                   config: Optional[Dict] = None) -> 'Game2048':
+        """Create a Game2048 instance from an existing board state.
+
+        Useful for search-based agents that need to evaluate arbitrary
+        board positions without playing through a full game. The returned
+        instance is fully functional — you can call ``move()``,
+        ``get_available_moves()``, ``is_game_over()``, etc.
+
+        The instance's RNG is **not** seeded, so tile spawns during
+        simulation are non-deterministic (appropriate for MCTS rollouts).
+
+        Args:
+            board (np.ndarray): 2D integer array representing the board.
+                Shape determines ``grid_size`` if config is not provided.
+            score (int): Starting score. Defaults to 0.
+            config (Dict | None): Optional config overrides. If None,
+                defaults are used with ``grid_size`` inferred from ``board``.
+
+        Returns:
+            Game2048: A new instance with the given board and score.
+
+        Example::
+
+            import numpy as np
+            board = np.array([[2, 4, 0, 0],
+                              [0, 2, 0, 0],
+                              [0, 0, 0, 0],
+                              [0, 0, 0, 2]])
+            game = Game2048.from_state(board, score=100)
+            game.move(Action.LEFT)
+        """
+        config = config or {}
+        obj = cls.__new__(cls)
+        obj.grid_size = config.get('grid_size', board.shape[0])
+        obj.tile_2_prob = config.get('tile_2_probability', 0.9)
+        obj.initial_tiles = config.get('initial_tiles', 2)
+        obj.seed = None  # simulations use independent RNG
+        obj.board = board.copy()
+        obj.score = score
+        obj.game_over = False
+        return obj
+
+    def clone(self) -> 'Game2048':
+        """Create an independent copy of this game for simulation.
+
+        The clone shares no mutable state with the original — modifying
+        the clone (calling ``move()``, etc.) has zero side effects on
+        the source instance. The clone's RNG is independent.
+
+        This is the primary method search agents should use::
+
+            for action in game.get_available_moves():
+                sim = game.clone()
+                sim.move(action)
+                value = evaluate(sim)
+
+        Returns:
+            Game2048: A deep copy with identical board, score, and config
+                but independent state.
+        """
+        return Game2048.from_state(
+            board=self.board,
+            score=self.score,
+            config={
+                'grid_size': self.grid_size,
+                'tile_2_probability': self.tile_2_prob,
+                'initial_tiles': self.initial_tiles,
+            },
+        )
+
+    # ─── Core game logic ──────────────────────────────────────────
 
     def _add_random_tile(self) -> bool:
         """Place a new tile (2 or 4) on a random empty cell.
