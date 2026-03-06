@@ -32,7 +32,8 @@ Typical human usage::
     python game_2048.py              # reads config.json
     python game_2048.py --agent      # random agent demo
 """
-
+import os
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 import pygame
 import numpy as np
 import json
@@ -239,25 +240,94 @@ class Game2048:
         return True
 
     def get_available_moves(self) -> List[Action]:
-        """Return a list of actions that would change the board state.
+            """Return a list of actions that would change the board state.
 
-        Each candidate action is simulated on a copy of the board. Only
-        actions that produce a different board configuration are included.
+            Uses lightweight checks (can a tile slide or merge in each
+            direction?) instead of executing full moves. No board copies,
+            no slide-and-merge operations.
 
-        Returns:
-            List[Action]: Valid actions from the current state. May be empty
-                if the game is over.
-        """
-        moves = []
-        for action in Action:
-            board_copy = self.board.copy()
-            score_copy = self.score
-            changed, _ = self._execute_move(action)
-            if changed:
-                moves.append(action)
-            self.board = board_copy
-            self.score = score_copy
-        return moves
+            Returns:
+                List[Action]: Valid actions from the current state.
+            """
+            moves = []
+            b = self.board
+            n = self.grid_size
+
+            # LEFT: for each row, check if any tile can slide left into
+            # an empty cell, or merge with the tile to its left
+            can_left = False
+            for r in range(n):
+                found_empty = False
+                for c in range(n):
+                    if b[r, c] == 0:
+                        found_empty = True
+                    elif found_empty:
+                        # Non-zero tile with an empty cell to its left
+                        can_left = True
+                        break
+                    elif c > 0 and b[r, c] == b[r, c - 1] and b[r, c] != 0:
+                        can_left = True
+                        break
+                if can_left:
+                    break
+            if can_left:
+                moves.append(Action.LEFT)
+
+            # RIGHT: mirror of LEFT — scan each row right to left
+            can_right = False
+            for r in range(n):
+                found_empty = False
+                for c in range(n - 1, -1, -1):
+                    if b[r, c] == 0:
+                        found_empty = True
+                    elif found_empty:
+                        can_right = True
+                        break
+                    elif c < n - 1 and b[r, c] == b[r, c + 1] and b[r, c] != 0:
+                        can_right = True
+                        break
+                if can_right:
+                    break
+            if can_right:
+                moves.append(Action.RIGHT)
+
+            # UP: for each column, check if any tile can slide up
+            can_up = False
+            for c in range(n):
+                found_empty = False
+                for r in range(n):
+                    if b[r, c] == 0:
+                        found_empty = True
+                    elif found_empty:
+                        can_up = True
+                        break
+                    elif r > 0 and b[r, c] == b[r - 1, c] and b[r, c] != 0:
+                        can_up = True
+                        break
+                if can_up:
+                    break
+            if can_up:
+                moves.append(Action.UP)
+
+            # DOWN: mirror of UP — scan each column bottom to top
+            can_down = False
+            for c in range(n):
+                found_empty = False
+                for r in range(n - 1, -1, -1):
+                    if b[r, c] == 0:
+                        found_empty = True
+                    elif found_empty:
+                        can_down = True
+                        break
+                    elif r < n - 1 and b[r, c] == b[r + 1, c] and b[r, c] != 0:
+                        can_down = True
+                        break
+                if can_down:
+                    break
+            if can_down:
+                moves.append(Action.DOWN)
+
+            return moves
 
     def calculate_reward(self, old_board: np.ndarray, new_board: np.ndarray,
                          merges: List[Tuple[int, int, int]]) -> int:
