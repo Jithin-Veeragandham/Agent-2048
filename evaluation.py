@@ -78,24 +78,13 @@ class RewardFunction:
         """
         empty_mask = (board == 0)
         empty_count = int(np.sum(empty_mask))
-
-        # Count component: squared to emphasize scarcity
         count_score = empty_count ** 2
 
-        # Adjacency component: count neighboring empty-empty pairs
-        adjacency = 0
-        rows, cols = board.shape
-        for r in range(rows):
-            for c in range(cols):
-                if empty_mask[r, c]:
-                    if c + 1 < cols and empty_mask[r, c + 1]:
-                        adjacency += 1
-                    if r + 1 < rows and empty_mask[r + 1, c]:
-                        adjacency += 1
+        # Vectorized adjacency: horizontal + vertical empty-empty pairs
+        horiz = int(np.sum(empty_mask[:, :-1] & empty_mask[:, 1:]))
+        vert = int(np.sum(empty_mask[:-1, :] & empty_mask[1:, :]))
 
-        return float(count_score + adjacency)
-
-    
+        return float(count_score + horiz + vert)
 
     @staticmethod
     def merge_potential(board: np.ndarray) -> float:
@@ -110,20 +99,18 @@ class RewardFunction:
         Returns:
             float: Weighted count of mergeable adjacent pairs.
         """
-        score = 0.0
-        rows, cols = board.shape
-        for r in range(rows):
-            for c in range(cols):
-                val = board[r, c]
-                if val == 0:
-                    continue
-                weight = np.log2(val) if val > 0 else 0
-                # Check right neighbor
-                if c + 1 < cols and board[r, c + 1] == val:
-                    score += weight
-                # Check bottom neighbor
-                if r + 1 < rows and board[r + 1, c] == val:
-                    score += weight
+        log_board = np.zeros_like(board, dtype=float)
+        mask = board > 0
+        log_board[mask] = np.log2(board[mask].astype(float))
+
+        # Horizontal matches
+        h_match = (board[:, :-1] == board[:, 1:]) & (board[:, :-1] > 0)
+        score = float(np.sum(log_board[:, :-1][h_match]))
+
+        # Vertical matches
+        v_match = (board[:-1, :] == board[1:, :]) & (board[:-1, :] > 0)
+        score += float(np.sum(log_board[:-1, :][v_match]))
+
         return score
 
     @staticmethod
@@ -143,18 +130,14 @@ class RewardFunction:
         mask = board > 0
         log_board[mask] = np.log2(board[mask].astype(float))
 
-        penalty = 0.0
-        rows, cols = board.shape
-        for r in range(rows):
-            for c in range(cols):
-                if board[r, c] == 0:
-                    continue
-                # Right neighbor
-                if c + 1 < cols and board[r, c + 1] != 0:
-                    penalty += abs(log_board[r, c] - log_board[r, c + 1])
-                # Bottom neighbor
-                if r + 1 < rows and board[r + 1, c] != 0:
-                    penalty += abs(log_board[r, c] - log_board[r + 1, c])
+        # Horizontal: both non-zero
+        h_both = (board[:, :-1] > 0) & (board[:, 1:] > 0)
+        penalty = float(np.sum(np.abs(log_board[:, :-1] - log_board[:, 1:])[h_both]))
+
+        # Vertical: both non-zero
+        v_both = (board[:-1, :] > 0) & (board[1:, :] > 0)
+        penalty += float(np.sum(np.abs(log_board[:-1, :] - log_board[1:, :])[v_both]))
+
         return penalty
 
     # ─── Composite Score ──────────────────────────────────────────

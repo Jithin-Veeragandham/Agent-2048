@@ -112,6 +112,8 @@ class InteractionModule:
         agent: An instance of BaseAgent.
         reward_fn: RewardFunction instance for board evaluation.
             Defaults to REWARD_SEARCH.
+        logger: Optional RunLogger instance from utils.py. If provided,
+            board states and reward breakdowns are logged every move.
         verbose: If True, print per-episode stats during run.
 
     Example::
@@ -124,6 +126,21 @@ class InteractionModule:
         module.run(num_games=100)
         module.print_results()
         module.save_results("mcts_6x6_results.json")
+
+    Example with logging::
+
+        from utils import RunLogger
+
+        logger = RunLogger()
+        module = InteractionModule(
+            config={"grid_size": 4},
+            agent=my_agent,
+            reward_fn=REWARD_SEARCH,
+            logger=logger,
+        )
+        module.run(num_games=50)
+        # logs/AgentName_latest_run.json  written
+        # logs/AgentName_all_runs.jsonl   appended
     """
 
     def __init__(
@@ -131,13 +148,17 @@ class InteractionModule:
         config: Dict,
         agent: BaseAgent,
         reward_fn: Optional[RewardFunction] = None,
+        logger=None,
         verbose: bool = False,
+        print_board: bool = False,
     ):
         self.config = config
         self.agent = agent
         self.reward_fn = reward_fn or REWARD_SEARCH
         self.evaluator = GameEvaluator()
+        self.logger = logger
         self.verbose = verbose
+        self.print_board = print_board
 
     # ─── Single Episode ───────────────────────────────────────────
 
@@ -150,7 +171,7 @@ class InteractionModule:
             3. Record inference time
             4. Execute action on game, get reward
             5. Notify agent of transition (for RL agents)
-            6. Log move to evaluator
+            6. Log move to evaluator (and logger if present)
 
         Returns:
             Dict with episode summary: score, highest_tile, moves, etc.
@@ -158,6 +179,9 @@ class InteractionModule:
         game = Game2048(self.config)
         self.evaluator.start_episode()
         self.agent.on_episode_start()
+
+        if self.logger:
+            self.logger.on_episode_start()
 
         move_number = 0
 
@@ -192,6 +216,31 @@ class InteractionModule:
 
             # ── Log to evaluator ──
             self.evaluator.log_move(inference_ms)
+
+            # ── Log to logger (if present) ──
+            if self.logger:
+                breakdown = self.reward_fn.compute_breakdown(state)
+                self.logger.log_move(
+                    step=move_number,
+                    state=state,
+                    action=action,
+                    reward=reward,
+                    score=game.get_score(),
+                    inference_ms=inference_ms,
+                    reward_breakdown=breakdown,
+                )
+
+            # ── Print per-move board state ──
+            if self.print_board:
+                max_tile = int(np.max(next_state))
+                print(
+                    f"  Step {move_number:>4}  |  {action.name:<5}  |  "
+                    f"Reward: {reward:>5}  |  Score: {game.get_score():>7}  |  "
+                    f"Max tile: {max_tile:>5}  |  {inference_ms:>7.1f} ms"
+                )
+                print(next_state)
+                print()
+
             move_number += 1
 
         # ── Episode complete ──
@@ -201,11 +250,24 @@ class InteractionModule:
         self.agent.on_episode_end(final_state, final_score)
         ep_stats = self.evaluator.end_episode(game)
 
+        # ── Finalize logger episode ──
+        if self.logger:
+            final_breakdown = self.reward_fn.compute_breakdown(final_state)
+            self.logger.end_episode(
+                final_score=final_score,
+                highest_tile=ep_stats.highest_tile,
+                move_count=ep_stats.move_count,
+                reached_2048=ep_stats.reached_2048,
+                final_board=final_state,
+                final_reward_breakdown=final_breakdown,
+            )
+
         return {
             'score': ep_stats.score,
             'highest_tile': ep_stats.highest_tile,
             'moves': ep_stats.move_count,
             'reached_2048': ep_stats.reached_2048,
+            'final_board': final_state,
         }
 
     # ─── Multi-Episode Run ────────────────────────────────────────
@@ -219,6 +281,9 @@ class InteractionModule:
         Returns:
             List of per-episode summary dicts.
         """
+        if self.logger:
+            self.logger.on_run_start()
+
         results = []
         print(f"\nRunning {self.agent.name} for {num_games} games "
               f"(grid: {self.config.get('grid_size', 4)}×"
@@ -234,12 +299,20 @@ class InteractionModule:
                       f"Score: {ep_result['score']:>8}  |  "
                       f"Max Tile: {ep_result['highest_tile']:>5}  |  "
                       f"Moves: {ep_result['moves']:>4}")
+                if self.print_board:
+                    print(ep_result.get('final_board', ''))
+                    print()
             elif (i + 1) % max(1, num_games // 10) == 0:
                 pct = (i + 1) / num_games * 100
                 print(f"  Progress: {pct:.0f}% ({i + 1}/{num_games})")
 
         print(f"{'─' * 50}")
         print(f"Done.\n")
+
+        # ── Save logs ──
+        if self.logger:
+            self.logger.save(self.agent.name, self.config)
+
         return results
 
     # ─── Training Support (for RL agents) ─────────────────────────
@@ -284,6 +357,7 @@ def run_comparison(
     agents: List[BaseAgent],
     num_games: int = 100,
     reward_fn: Optional[RewardFunction] = None,
+    logger=None,
     verbose: bool = False,
 ) -> List[Dict]:
     """Run multiple agents under identical settings and compare.
@@ -297,6 +371,8 @@ def run_comparison(
         agents: List of BaseAgent instances to evaluate.
         num_games: Games per agent.
         reward_fn: Shared RewardFunction (or None for default).
+        logger: Optional RunLogger. If provided, each agent's run
+            is logged separately (logger is reset between agents).
         verbose: Print per-game stats.
 
     Returns:
@@ -317,7 +393,7 @@ def run_comparison(
     all_results = []
 
     for agent in agents:
-        module = InteractionModule(config, agent, reward_fn, verbose)
+        module = InteractionModule(config, agent, reward_fn, logger, verbose)
         module.run(num_games)
         summary = module.get_results()
         all_results.append(summary)
