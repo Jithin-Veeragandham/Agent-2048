@@ -286,32 +286,6 @@ def run_comparison(
     reward_fn: Optional[RewardFunction] = None,
     verbose: bool = False,
 ) -> List[Dict]:
-    """Run multiple agents under identical settings and compare.
-
-    This is the top-level function for your final evaluation.
-    Each agent plays the same number of games with the same config,
-    and results are printed in a side-by-side comparison table.
-
-    Args:
-        config: Game configuration dict.
-        agents: List of BaseAgent instances to evaluate.
-        num_games: Games per agent.
-        reward_fn: Shared RewardFunction (or None for default).
-        verbose: Print per-game stats.
-
-    Returns:
-        List of summary dicts, one per agent.
-
-    Example::
-
-        from interaction import run_comparison
-
-        results = run_comparison(
-            config={"grid_size": 6},
-            agents=[mcts_agent, dqn_agent, ppo_agent, alphazero_agent, beam_agent],
-            num_games=100,
-        )
-    """
     from evaluation import compare_agents
 
     all_results = []
@@ -328,11 +302,7 @@ def run_comparison(
     return all_results
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  BUILT-IN AGENTS — Random baseline + Human wrapper
-# ═══════════════════════════════════════════════════════════════════
-
-class RandomAgent(BaseAgent):
+'''class RandomAgent(BaseAgent):
     """Baseline agent that picks uniformly random valid moves.
 
     Use this to establish a performance floor for comparison.
@@ -344,10 +314,6 @@ class RandomAgent(BaseAgent):
     def choose_action(self, state, available_moves, game_context=None):
         return available_moves[np.random.randint(len(available_moves))]
 
-
-# ═══════════════════════════════════════════════════════════════════
-#  DEMO
-# ═══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     # Load config
@@ -364,4 +330,4 @@ if __name__ == "__main__":
     agent = RandomAgent()
     module = InteractionModule(config, agent, verbose=True)
     module.run(num_games=20)
-    module.print_results()
+    module.print_results()'''

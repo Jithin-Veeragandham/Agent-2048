@@ -223,9 +223,9 @@ REWARD_SEARCH = RewardFunction(weights={
 })
 
 # Simplified for RL agents (DQN, PPO) — let the network learn structure
-'''REWARD_RL = RewardFunction(weights={
+REWARD_RL = RewardFunction(weights={
     'tile': 1.0, 'empty': 0.3, 'mono': 0.0, 'merge': 0.0, 'smooth': 0.0
-})'''
+})
 
 # Minimal shaping for AlphaZero — value head learns evaluation
 '''REWARD_ALPHAZERO = RewardFunction(weights={

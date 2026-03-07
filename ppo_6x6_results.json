@@ -1,0 +1,20 @@
+{
+  "agent": "Agent",
+  "num_episodes": 100,
+  "win_rate_2048": 100.0,
+  "win_rate_4096": 94.0,
+  "win_rate_8192": 71.0,
+  "avg_merge_score": 172701.8,
+  "avg_moves_per_game": 7141.39,
+  "highest_tile_distribution": {
+    "2048": 6.0,
+    "4096": 23.0,
+    "8192": 44.0,
+    "16384": 27.0
+  },
+  "avg_inference_ms": 2.423,
+  "p95_inference_ms": 5.034,
+  "training_time_sec": 1772848141.74,
+  "training_episodes": 107,
+  "score_per_compute_sec": 0.0
+}
