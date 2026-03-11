@@ -67,14 +67,42 @@ except ImportError:
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  PRECOMPUTED WEIGHT MATRICES (built once, reused every call)
+# ═══════════════════════════════════════════════════════════════════
+
+_SNAKE_CACHE: Dict[tuple, np.ndarray] = {}
+
+
+def _get_snake_weights(rows: int, cols: int) -> np.ndarray:
+    """Get normalized snake-pattern weight matrix, cached by grid size."""
+    key = (rows, cols)
+    if key not in _SNAKE_CACHE:
+        n = rows * cols
+        weights = np.zeros((rows, cols), dtype=float)
+        idx = 0
+        for r in range(rows):
+            row_range = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
+            for c in row_range:
+                weights[r, c] = 4.0 ** (n - 1 - idx)
+                idx += 1
+        _SNAKE_CACHE[key] = weights / np.max(weights)
+    return _SNAKE_CACHE[key]
+
+
+# Eagerly warm the 4×4 cache at import time
+_get_snake_weights(4, 4)
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  HEURISTIC EVALUATION (for rollout move selection only)
 # ═══════════════════════════════════════════════════════════════════
 
 def _default_heuristic(board: np.ndarray) -> float:
     """Composite heuristic for guiding rollout move selection.
 
-    Fully vectorized — no Python loops. Used to pick which move
-    to play during a rollout, NOT as the tree value.
+    Uses CMA-ES tuned weights (gen 90, beam search w=10 d=5, 80% win rate).
+    Snake weight matrix is precomputed and cached. log_board is computed
+    once and shared across all components.
 
     Components: tile_score, empty_bonus, monotonicity (snake pattern),
     merge_potential, smoothness penalty.
@@ -82,29 +110,23 @@ def _default_heuristic(board: np.ndarray) -> float:
     rows, cols = board.shape
     n = rows * cols
 
+    # ── Shared log board (used by tile, mono, merge, smooth) ──
+    mask = board > 0
+    log_board = np.zeros_like(board, dtype=float)
+    log_board[mask] = np.log2(board[mask].astype(float))
+
     # ── Tile score ────────────────────────────────────────────
-    non_zero = board[board > 0].astype(float)
-    tile = float(np.sum(non_zero * np.log2(non_zero))) if len(non_zero) > 0 else 0.0
+    tile = float(np.sum(board[mask].astype(float) * log_board[mask]))
 
     # ── Empty bonus (vectorized adjacency) ────────────────────
-    empty_mask = (board == 0)
+    empty_mask = ~mask
     empty_count = int(np.sum(empty_mask))
     horiz = int(np.sum(empty_mask[:, :-1] & empty_mask[:, 1:]))
     vert = int(np.sum(empty_mask[:-1, :] & empty_mask[1:, :]))
     empty = float(empty_count ** 2 + horiz + vert)
 
-    # ── Monotonicity (snake pattern) ──────────────────────────
-    weights = np.zeros((rows, cols), dtype=float)
-    idx = 0
-    for r in range(rows):
-        row_range = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
-        for c in row_range:
-            weights[r, c] = 4.0 ** (n - 1 - idx)
-            idx += 1
-    log_board = np.zeros_like(board, dtype=float)
-    mask = board > 0
-    log_board[mask] = np.log2(board[mask].astype(float))
-    mono = float(np.sum(log_board * weights / np.max(weights)))
+    # ── Monotonicity (snake pattern, cached weights) ──────────
+    mono = float(np.sum(log_board * _get_snake_weights(rows, cols)))
 
     # ── Merge potential (vectorized) ──────────────────────────
     h_match = (board[:, :-1] == board[:, 1:]) & (board[:, :-1] > 0)
@@ -112,8 +134,8 @@ def _default_heuristic(board: np.ndarray) -> float:
     merge = float(np.sum(log_board[:, :-1][h_match]) + np.sum(log_board[:-1, :][v_match]))
 
     # ── Smoothness (vectorized) ───────────────────────────────
-    h_both = (board[:, :-1] > 0) & (board[:, 1:] > 0)
-    v_both = (board[:-1, :] > 0) & (board[1:, :] > 0)
+    h_both = mask[:, :-1] & mask[:, 1:]
+    v_both = mask[:-1, :] & mask[1:, :]
     smooth = float(
         np.sum(np.abs(log_board[:, :-1] - log_board[:, 1:])[h_both])
         + np.sum(np.abs(log_board[:-1, :] - log_board[1:, :])[v_both])
@@ -155,18 +177,13 @@ def _resolve_rollout_policy(eval_fn=None, reward_fn=None):
     """Pick the best available rollout policy function.
 
     This function is used to SELECT MOVES during rollouts, not
-    to compute tree values.
+    to compute tree values. Defaults to the fast _default_heuristic
+    (CMA-ES tuned) rather than the heavier RewardFunction class.
     """
     if reward_fn is not None:
         return reward_fn.compute
     if eval_fn is not None:
         return eval_fn
-    if RewardFunction is not None:
-        rf = RewardFunction(weights={
-            'tile': 1.9708, 'empty': 1.2888, 'mono': 1.6159,
-            'merge': 1.9457, 'smooth': 1.3083,
-        })
-        return rf.compute
     return _default_heuristic
 
 
@@ -185,7 +202,7 @@ def _worker_random_rollout(board, score, rollout_depth, tile_2_prob):
         moves = sim.get_available_moves()
         if not moves:
             break
-        sim.move(moves[np.random.randint(len(moves))])
+        sim.move_fast(moves[np.random.randint(len(moves))])
     return float(sim.get_score())
 
 
@@ -205,13 +222,13 @@ def _worker_greedy_rollout(board, score, rollout_depth, tile_2_prob):
         best_move = moves[0]
         for move in moves:
             child = sim.clone()
-            child.move(move)
-            h = _default_heuristic(child.get_state())
+            child.move_fast(move)
+            h = _default_heuristic(child.board)
             if h > best_h:
                 best_h = h
                 best_move = move
 
-        sim.move(best_move)
+        sim.move_fast(best_move)
 
     return sim.get_score() + float(np.sum(sim.get_state()))
 
@@ -224,7 +241,7 @@ class MCTSNode:
     """A single node in the MCTS search tree."""
 
     __slots__ = ('game', 'parent', 'action', 'children',
-                 'visits', 'value', 'untried')
+                 'visits', 'value', 'untried', '_terminal')
 
     def __init__(self, game, parent=None, action=None):
         self.game = game
@@ -234,6 +251,7 @@ class MCTSNode:
         self.visits = 0
         self.value = 0.0
         self.untried: List[Action] = game.get_available_moves()
+        self._terminal: bool = game.is_game_over() or len(self.untried) == 0
 
     @property
     def is_fully_expanded(self):
@@ -241,7 +259,7 @@ class MCTSNode:
 
     @property
     def is_terminal(self):
-        return self.game.is_game_over() or not self.game.get_available_moves()
+        return self._terminal
 
     def ucb1(self, c):
         if self.visits == 0:
@@ -256,7 +274,7 @@ class MCTSNode:
     def expand(self):
         action = self.untried.pop()
         child_game = self.game.clone()
-        child_game.move(action)
+        child_game.move_fast(action)
         child = MCTSNode(child_game, parent=self, action=action)
         self.children[action] = child
         return child
@@ -301,7 +319,7 @@ class MCTSAgent(BaseAgent):
         return node
 
     def _rollout(self, game):
-        """Random rollout, return game score + tile sum."""
+        """Random rollout, return game score."""
         sim = game.clone()
         for _ in range(self.rollout_depth):
             if sim.is_game_over():
@@ -309,7 +327,7 @@ class MCTSAgent(BaseAgent):
             moves = sim.get_available_moves()
             if not moves:
                 break
-            sim.move(moves[np.random.randint(len(moves))])
+            sim.move_fast(moves[np.random.randint(len(moves))])
         return _tree_value(sim)
 
     def _backpropagate(self, node, value):
@@ -387,15 +405,15 @@ class MCTSHeuristicAgent(BaseAgent):
 
     The heuristic picks which move to play at each rollout step
     (greedy move selection). But the value backpropagated through
-    the MCTS tree is the raw game score + tile sum — giving UCB1
-    large, well-separated values to distinguish good from bad branches.
+    the MCTS tree is the raw game score — giving UCB1 large,
+    well-separated values to distinguish good from bad branches.
 
     This matches the approach from thomasahle/mcts-2048 (greedy
     rollout policy + SumMeasure for evaluation) and chadpalmer2
     (game score for evaluation).
 
-    When rollout_depth=0, the leaf node's game score + tile sum is
-    used directly (no rollout).
+    When rollout_depth=0, the leaf node's game score is used
+    directly (no rollout).
 
     Args:
         num_simulations: MCTS iterations per move decision.
@@ -443,7 +461,7 @@ class MCTSHeuristicAgent(BaseAgent):
         return node
 
     def _rollout(self, game):
-        """Greedy heuristic rollout, return game score + tile sum."""
+        """Greedy heuristic rollout, return game score."""
         if self.rollout_depth == 0:
             return _tree_value(game)
 
@@ -455,20 +473,20 @@ class MCTSHeuristicAgent(BaseAgent):
             if not moves:
                 break
 
-            # Heuristic picks the move
+            # Heuristic picks the move — read board directly, skip copy
             best_h = -float('inf')
             best_move = moves[0]
             for move in moves:
                 child = sim.clone()
-                child.move(move)
-                h = self.rollout_policy(child.get_state())
+                child.move_fast(move)
+                h = self.rollout_policy(child.board)
                 if h > best_h:
                     best_h = h
                     best_move = move
 
-            sim.move(best_move)
+            sim.move_fast(best_move)
 
-        # Game score + tile sum drives the tree
+        # Game score drives the tree
         return _tree_value(sim)
 
     def _backpropagate(self, node, value):
@@ -545,7 +563,7 @@ if __name__ == "__main__":
     from interaction import InteractionModule
     from utils import RunLogger
 
-    config = {"grid_size": 4, "random_seed": 42}
+    config = {"grid_size": 4}
     logger = RunLogger()
 
     # ── Run classic MCTS ──────────────────────────────────────
@@ -564,7 +582,11 @@ if __name__ == "__main__":
     print("=" * 60)
     print("  HEURISTIC MCTS (greedy rollouts, game score tree value)")
     print("=" * 60)
-    agent_heuristic = MCTSAgent(num_simulations=500, rollout_depth=30, exploration=100.0)
+    agent_heuristic = MCTSHeuristicAgent(
+        num_simulations=100,
+        rollout_depth=10,
+        exploration=100.0,
+    )
     module2 = InteractionModule(
         config=config, agent=agent_heuristic,
         logger=logger, verbose=True, print_board=True,
