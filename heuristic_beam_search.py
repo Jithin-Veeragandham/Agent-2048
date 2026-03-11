@@ -98,8 +98,6 @@ def _default_heuristic(board: np.ndarray) -> float:
     empty = float(empty_count ** 2 + adjacency)
 
     # ── Monotonicity (snake pattern from top-left corner) ─────
-    # Build ideal weight grid: highest weight at corner, decaying
-    # along a snake path.
     weights = np.zeros((rows, cols), dtype=float)
     idx = 0
     for r in range(rows):
@@ -185,6 +183,8 @@ class BeamSearchAgent(BaseAgent):
         agent = BeamSearchAgent(beam_width=15, search_depth=20)
     """
 
+    agent_type = "beam_search"
+
     def __init__(
         self,
         beam_width: int = 15,
@@ -204,11 +204,18 @@ class BeamSearchAgent(BaseAgent):
         elif RewardFunction is not None:
             # Use project's RewardFunction with monotonicity-friendly weights
             self._reward_fn = RewardFunction(weights={
-                'tile': 1.0, 'empty': 0.5, 'merge': 0.5, 'smooth': 0.3,
+                'tile': 1.0, 'empty': 0.5, 'mono': 1.5,
+                'corner': 0, 'merge': 0.5, 'smooth': 0.1,
             })
             self.eval_fn = self._reward_fn.compute
         else:
             self.eval_fn = _default_heuristic
+
+    def get_params(self) -> Dict:
+        return {
+            'beam_width': self.beam_width,
+            'search_depth': self.search_depth,
+        }
 
     def choose_action(
         self,
@@ -288,16 +295,20 @@ if __name__ == "__main__":
     from interaction import InteractionModule
     from utils import RunLogger
 
-    config = {"grid_size": 4, "random_seed": 42}
-    agent = BeamSearchAgent(beam_width=5, search_depth=5)
+    config = {"grid_size": 4}
+    game_agent = BeamSearchAgent(
+        beam_width=10,
+        search_depth=15,
+        reward_fn=RewardFunction(weights={'tile': 1.9708, 'empty': 1.2888, 'mono': 1.6159, 'corner': 2.2907, 'merge': 1.9457, 'smooth': 1.3083})
+    )
     logger = RunLogger()
 
     module = InteractionModule(
         config=config,
-        agent=agent,
+        agent=game_agent,
         logger=logger,
         verbose=True,
         print_board=True,
     )
-    module.run(num_games=1)
+    module.run(num_games=10)
     module.print_results()

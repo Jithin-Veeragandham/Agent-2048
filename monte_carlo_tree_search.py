@@ -119,7 +119,7 @@ def _default_heuristic(board: np.ndarray) -> float:
         + np.sum(np.abs(log_board[:-1, :] - log_board[1:, :])[v_both])
     )
 
-    # ── Normalize & combine ───────────────────────────────────
+    # ── Normalize & combine (CMA-ES tuned, gen 90) ───────────
     t_norm = tile / max(2048 * 11 * n, 1)
     e_norm = empty / max(n ** 2 + n * 2, 1)
     m_norm = mono / max(11 * n, 1)
@@ -127,11 +127,11 @@ def _default_heuristic(board: np.ndarray) -> float:
     s_norm = smooth / max(11 * n * 2, 1)
 
     return (
-        1.0 * t_norm
-        + 0.5 * e_norm
-        + 1.0 * m_norm
-        + 0.5 * mp_norm
-        - 0.3 * s_norm
+        1.9708 * t_norm
+        + 1.2888 * e_norm
+        + 1.6159 * m_norm
+        + 1.9457 * mp_norm
+        - 1.3083 * s_norm
     )
 
 
@@ -163,7 +163,8 @@ def _resolve_rollout_policy(eval_fn=None, reward_fn=None):
         return eval_fn
     if RewardFunction is not None:
         rf = RewardFunction(weights={
-            'tile': 1.0, 'empty': 0.5, 'merge': 0.5, 'smooth': 0.3,
+            'tile': 1.9708, 'empty': 1.2888, 'mono': 1.6159,
+            'merge': 1.9457, 'smooth': 1.3083,
         })
         return rf.compute
     return _default_heuristic
@@ -563,7 +564,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("  HEURISTIC MCTS (greedy rollouts, game score tree value)")
     print("=" * 60)
-    agent_heuristic = MCTSAgent(num_simulations=500, rollout_depth=50, exploration=100.0)
+    agent_heuristic = MCTSAgent(num_simulations=500, rollout_depth=30, exploration=100.0)
     module2 = InteractionModule(
         config=config, agent=agent_heuristic,
         logger=logger, verbose=True, print_board=True,
