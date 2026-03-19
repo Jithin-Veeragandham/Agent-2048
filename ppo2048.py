@@ -28,230 +28,112 @@ ACTIONS = [Action.UP, Action.DOWN, Action.LEFT, Action.RIGHT]
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  PRECOMPUTED LUT — row merge lookup table (4 cells, 4-bit exps)
-#  This replaces the slow Python game loop with O(1) tensor lookups.
+#  VECTORIZED ENV — wraps game.py's Game2048 for batch operations
+#  Returns torch tensors on the specified device for GPU training.
 # ═══════════════════════════════════════════════════════════════════
 
-_ROW_COUNT = 1 << 16
-_LUT_ROW = torch.zeros(_ROW_COUNT, 4, dtype=torch.int64)
-_LUT_REWARD = torch.zeros(_ROW_COUNT, dtype=torch.float32)
+class GameVectorizedEnv:
+    """Runs N 2048 games in parallel using game.py's Game2048.
 
-for _idx in range(_ROW_COUNT):
-    _e0 = (_idx >> 12) & 0xF
-    _e1 = (_idx >> 8) & 0xF
-    _e2 = (_idx >> 4) & 0xF
-    _e3 = _idx & 0xF
-    _tiles = [0 if e == 0 else (1 << e) for e in (_e0, _e1, _e2, _e3)]
-    _merged = []
-    _reward = 0
-    _i = 0
-    while _i < 4:
-        if _i < 3 and _tiles[_i] == _tiles[_i + 1] and _tiles[_i] != 0:
-            _mv = _tiles[_i] * 2
-            _reward += _mv
-            _merged.append(_mv)
-            _i += 2
-        else:
-            if _tiles[_i] != 0:
-                _merged.append(_tiles[_i])
-            _i += 1
-    while len(_merged) < 4:
-        _merged.append(0)
-    _new_exps = [0 if v == 0 else int(math.log2(v)) for v in _merged]
-    _LUT_ROW[_idx] = torch.tensor(_new_exps, dtype=torch.int64)
-    _LUT_REWARD[_idx] = _reward
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  TENSOR VECTORIZED ENV — pure PyTorch, no Python game loop
-#  ~100x faster than looping over Game2048 objects
-# ═══════════════════════════════════════════════════════════════════
-
-class TensorVectorizedEnv:
-    """Vectorized 2048 using tensor operations + LUT.
-
-    All N boards live in a single (N, grid, grid) int64 tensor.
-    Moves use a precomputed lookup table — no Python loops over envs.
+    Each environment is a real Game2048 instance. Board states are
+    synced to a shared torch tensor for GPU-based neural network
+    inference. All game logic flows through game.py.
     """
 
     def __init__(self, num_envs: int, config: Dict, device: str = 'cpu'):
         self.num_envs = num_envs
+        self.config = config
         self.grid_size = config.get('grid_size', 4)
         self.device = device
-        self._LUT_ROW = _LUT_ROW.to(device)
-        self._LUT_REWARD = _LUT_REWARD.to(device)
-        self.state = torch.zeros(
-            num_envs, self.grid_size, self.grid_size,
-            device=device, dtype=torch.int64
-        )
+        self.games = [Game2048(config) for _ in range(num_envs)]
+        self.state = self._sync_state()
         self.done = torch.zeros(num_envs, dtype=torch.bool, device=device)
         self.score = torch.zeros(num_envs, dtype=torch.float32, device=device)
 
+    def _sync_state(self) -> torch.Tensor:
+        """Read all Game2048 boards into a single (N, grid, grid) tensor."""
+        boards = np.stack([g.get_state() for g in self.games])
+        return torch.from_numpy(boards).to(dtype=torch.int64, device=self.device)
+
     def reset(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Reset all envs, spawn 2 tiles each."""
-        self.state.zero_()
+        """Reset all environments."""
+        self.games = [Game2048(self.config) for _ in range(self.num_envs)]
+        self.state = self._sync_state()
         self.done.zero_()
         self.score.zero_()
-        self._add_random_tiles(count=2)
         return self.state.clone(), self.done.clone()
 
     def reset_envs(self, mask: torch.Tensor):
-        """Reset only the envs where mask is True."""
+        """Reset only environments where mask is True."""
         if not mask.any():
             return
-        n_reset = mask.sum().item()
-        self.state[mask] = 0
+        mask_np = mask.cpu().numpy()
+        for i in range(self.num_envs):
+            if mask_np[i]:
+                self.games[i] = Game2048(self.config)
+                self.score[i] = 0.0
+        self.state = self._sync_state()
         self.done[mask] = False
-        self.score[mask] = 0.0
-        # Spawn 2 tiles for reset envs
-        self._add_random_tiles(count=2, env_mask=mask)
 
     def step(self, actions: torch.Tensor
              ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Step all envs. Returns (next_state, rewards, dones)."""
+        """Step all envs using game.py. Returns (next_state, rewards, dones)."""
         _, next_state, rewards, dones = self.step_with_legal(actions)
         return next_state, rewards, dones
 
     def step_with_legal(self, actions: torch.Tensor
              ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Step all envs AND compute legal mask for the NEW state in one pass.
+        """Step all envs AND compute legal mask for next state.
 
-        Computes all 4 moves only ONCE instead of twice (step + get_legal_mask).
         Returns (legal_mask_for_next_state, next_state, rewards, dones).
         """
-        prev = self.state.clone()
+        actions_np = actions.cpu().numpy()
+        rewards = torch.zeros(self.num_envs, device=self.device)
+        dones = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
-        # Compute all 4 moves ONCE
-        moved0, rew0 = self._move_lut(self.state, 0)
-        moved1, rew1 = self._move_lut(self.state, 1)
-        moved2, rew2 = self._move_lut(self.state, 2)
-        moved3, rew3 = self._move_lut(self.state, 3)
+        for i, g in enumerate(self.games):
+            action = ACTIONS[int(actions_np[i])]
+            valid, reward = g.move(action)
+            rewards[i] = float(reward)
+            dones[i] = g.is_game_over()
 
-        moved_stack = torch.stack([moved0, moved1, moved2, moved3], dim=1)
-        rew_stack = torch.stack([rew0, rew1, rew2, rew3], dim=1)
-
-        idx = torch.arange(self.num_envs, device=self.device)
-        actions = actions.to(self.device)
-        self.state = moved_stack[idx, actions]
-        rewards = rew_stack[idx, actions]
-
-        # Spawn tiles ONLY where board changed
-        changed = (self.state != prev).reshape(self.num_envs, -1).any(dim=1)
-        if changed.any():
-            self._add_random_tiles(count=1, env_mask=changed)
-
+        self.state = self._sync_state()
+        self.done = dones
         self.score += rewards
-        done = self._check_done()
-        self.done = done
 
-        # Now compute legal mask for the NEW state (need fresh moves)
+        # Compute legal mask for the NEW state
         legal = torch.zeros(self.num_envs, 4, device=self.device)
-        m0, _ = self._move_lut(self.state, 0)
-        m1, _ = self._move_lut(self.state, 1)
-        m2, _ = self._move_lut(self.state, 2)
-        m3, _ = self._move_lut(self.state, 3)
-        for a_idx, m in enumerate([m0, m1, m2, m3]):
-            legal[:, a_idx] = (m != self.state).reshape(self.num_envs, -1).any(dim=1).float()
+        for i, g in enumerate(self.games):
+            available = g.get_available_moves()
+            for a in available:
+                legal[i, a.value] = 1.0
+        # If no legal moves, allow all (game is done anyway)
         no_legal = legal.sum(dim=1) == 0
         legal[no_legal] = 1.0
 
-        return legal, self.state.clone(), rewards.clone(), done.clone()
+        return legal, self.state.clone(), rewards.clone(), dones.clone()
 
     def get_legal_mask(self) -> torch.Tensor:
-        """Return (N, 4) float tensor: 1.0 if move changes board, else 0.0."""
+        """Return (N, 4) float tensor of legal moves using game.py."""
         legal = torch.zeros(self.num_envs, 4, device=self.device)
-        for a in range(4):
-            moved, _ = self._move_lut(self.state, a)
-            changed = (moved != self.state).reshape(self.num_envs, -1).any(dim=1)
-            legal[:, a] = changed.float()
+        for i, g in enumerate(self.games):
+            available = g.get_available_moves()
+            for a in available:
+                legal[i, a.value] = 1.0
         no_legal = legal.sum(dim=1) == 0
         legal[no_legal] = 1.0
         return legal
 
-    def _move_lut(self, states, action):
-        """LUT-based row merge. Action: 0=up, 1=down, 2=left, 3=right."""
-        # NOTE: action mapping matches game.py's Action enum:
-        #   Action.UP=0, Action.DOWN=1, Action.LEFT=2, Action.RIGHT=3
-        # LUT computes a LEFT merge, so we rotate to LEFT orientation first.
-        if action == 0:    # UP -> transpose then left-merge
-            s = states.permute(0, 2, 1)
-        elif action == 1:  # DOWN -> transpose + flip then left-merge
-            s = states.permute(0, 2, 1).flip(dims=[2])
-        elif action == 3:  # RIGHT -> flip then left-merge
-            s = states.flip(dims=[2])
-        else:              # LEFT -> already correct
-            s = states
 
-        batch = s.shape[0]
-        gs = self.grid_size
-        rows = s.reshape(batch * gs, gs)
+# ═══════════════════════════════════════════════════════════════════
+#  NEURAL NETWORK — same architecture as reference
+# ═══════════════════════════════════════════════════════════════════
 
-        # Exponents: 0 for empty, log2(val) otherwise
-        exps = torch.where(
-            rows == 0,
-            torch.zeros_like(rows, dtype=torch.int64),
-            torch.log2(rows.float()).to(torch.int64)
-        )
-        # LUT index from 4 exponents packed into 16 bits
-        idx = ((exps[:, 0] << 12) | (exps[:, 1] << 8) |
-               (exps[:, 2] << 4) | exps[:, 3]).to(torch.int64)
+# ═══════════════════════════════════════════════════════════════════
+#  INPUT ENCODING — one-hot exponent channels
+# ═══════════════════════════════════════════════════════════════════
 
-        new_exps = self._LUT_ROW[idx]
-        row_rewards = self._LUT_REWARD[idx]
-
-        out_vals = torch.where(
-            new_exps > 0, 1 << new_exps, torch.zeros_like(new_exps)
-        )
-        out = out_vals.reshape(batch, gs, gs)
-        rewards = row_rewards.reshape(batch, gs).sum(dim=1)
-
-        # Rotate back
-        if action == 0:
-            out = out.permute(0, 2, 1)
-        elif action == 1:
-            out = out.flip(dims=[2]).permute(0, 2, 1)
-        elif action == 3:
-            out = out.flip(dims=[2])
-
-        return out.to(self.state.dtype), rewards
-
-    def _add_random_tiles(self, count=1, env_mask=None):
-        """Spawn tiles. If env_mask given, only for those envs."""
-        for _ in range(count):
-            flat = self.state.view(self.num_envs, -1)
-            rnd = torch.rand(self.num_envs, flat.size(1), device=self.device)
-            mask = (flat == 0)
-            scores = rnd * mask.float() + (~mask).float() * -1.0
-            pos = scores.argmax(dim=1)
-            row = pos // self.grid_size
-            col = pos % self.grid_size
-
-            tiles = torch.where(
-                torch.rand(self.num_envs, device=self.device) < 0.9,
-                torch.full((self.num_envs,), 2, device=self.device,
-                           dtype=torch.int64),
-                torch.full((self.num_envs,), 4, device=self.device,
-                           dtype=torch.int64),
-            )
-            if env_mask is not None:
-                active = env_mask.nonzero(as_tuple=False).squeeze(-1)
-                self.state[active, row[active], col[active]] = tiles[active]
-            else:
-                idx = torch.arange(self.num_envs, device=self.device)
-                self.state[idx, row, col] = tiles
-
-    def _check_done(self) -> torch.Tensor:
-        empty = (self.state == 0).reshape(self.num_envs, -1).any(dim=1)
-        h = (self.state[:, :, :-1] == self.state[:, :, 1:]).reshape(
-            self.num_envs, -1).any(dim=1)
-        v = (self.state[:, :-1, :] == self.state[:, 1:, :]).reshape(
-            self.num_envs, -1).any(dim=1)
-        return ~(empty | h | v)
-
-
-
-
-NUM_TILE_CHANNELS = 16  
+NUM_TILE_CHANNELS = 16  # exponents 0..15 → tiles 0, 2, 4, ..., 32768
 
 
 def encode_board(x: torch.Tensor) -> torch.Tensor:
@@ -370,15 +252,6 @@ def compute_gae_advantages(
     return advantages, returns
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  REWARD SHAPING — tensorized versions of evaluation.py heuristics
-#
-#  All four heuristic components are converted from per-board NumPy
-#  loops to batched tensor ops over (N, grid, grid) tensors.
-#
-#  We use POTENTIAL-BASED SHAPING: reward += gamma * h(s') - h(s)
-#  This preserves the optimal policy while guiding exploration.
-# ═══════════════════════════════════════════════════════════════════
 
 # ── Default weights (matching evaluation.py's RewardFunction.DEFAULT_WEIGHTS)
 SHAPING_WEIGHTS = {
@@ -568,7 +441,7 @@ class PPOTrainer:
         self,
         config: Optional[Dict] = None,
         grid_size: int = 4,
-        num_envs: int = 512,
+        num_envs: int = 128,
         lr: float = 3e-4,
         gamma: float = 0.998,
         gae_lambda: float = 0.95,
@@ -576,10 +449,10 @@ class PPOTrainer:
         ent_coef_start: float = 0.05,
         ent_coef_end: float = 0.001,
         vf_coef: float = 0.5,
-        rollout_length: int = 128,
+        rollout_length: int = 64,
         epochs: int = 100000,
-        ppo_epochs: int = 2,
-        mini_batch_size: int = 2048,
+        ppo_epochs: int = 3,
+        mini_batch_size: int = 1024,
         device: str = None,
     ):
         self.config = config or {'grid_size': grid_size}
@@ -614,8 +487,8 @@ class PPOTrainer:
         )
         self.scaler = torch.amp.GradScaler(device=self.device)
 
-        # Use tensor-based env instead of Python game loop
-        self.env = TensorVectorizedEnv(num_envs, self.config, self.device)
+        # Use game.py-backed env
+        self.env = GameVectorizedEnv(num_envs, self.config, self.device)
 
         self.training_history: List[Dict] = []
         self.total_timesteps: int = 0
@@ -629,7 +502,7 @@ class PPOTrainer:
         rollout_length = self.rollout_length
         device = self.device
         epochs = self.total_epochs
-        checkpoint_interval = max(1, epochs // 10)
+        checkpoint_interval = min(5000, max(1, epochs // 10))
 
         network = self.network
         optimizer = self.optimizer
@@ -641,7 +514,7 @@ class PPOTrainer:
         batch_size = num_envs * rollout_length
 
         print(f"\n{'=' * 65}")
-        print(f"  PPO Training (Tensor LUT Engine)")
+        print(f"  PPO Training (game.py Engine)")
         print(f"  {grid_size}x{grid_size} | {num_envs} envs | "
               f"{rollout_length} steps/rollout | {epochs} epochs")
         print(f"  LR={self.optimizer.param_groups[0]['lr']:.1e} "
@@ -866,7 +739,7 @@ class PPOTrainer:
 
             # ── Checkpoint ──
             if ep % checkpoint_interval == 0 and ep > 0:
-                ckpt_path = f"models/ppo_ep{ep}.pt"
+                ckpt_path = f"models_2.0/ppo_ep{ep}.pt"
                 self.save_model(ckpt_path)
 
         total_time = time.time() - start_time
@@ -911,6 +784,9 @@ class PPOTrainer:
         print(f"  Loaded: {path}")
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  PPO AGENT — BaseAgent wrapper for InteractionModule
+# ═══════════════════════════════════════════════════════════════════
 
 class PPOAgent(BaseAgent):
     """Trained PPO agent for evaluation via InteractionModule."""
@@ -982,8 +858,11 @@ class PPOAgent(BaseAgent):
         return chosen
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  CONVENIENCE
+# ═══════════════════════════════════════════════════════════════════
 
-def train_and_evaluate(config=None, grid_size=4, num_envs=512,
+def train_and_evaluate(config=None, grid_size=4, num_envs=128,
                        epochs=100000, eval_games=100,
                        save_path="ppo_model.pt"):
     from interaction import InteractionModule
@@ -1009,28 +888,30 @@ def train_and_evaluate(config=None, grid_size=4, num_envs=512,
     module.save_results(f"ppo_{grid_size}x{grid_size}_results.json")
 
 
-
+# ═══════════════════════════════════════════════════════════════════
+#  CLI
+# ═══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="PPO 2048 (Tensor LUT Engine)")
+    parser = argparse.ArgumentParser(description="PPO 2048 (game.py Engine)")
     parser.add_argument("--mode", choices=["train", "eval", "full"],
                         default="full")
     parser.add_argument("--model", default="ppo_model.pt")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume training from")
     parser.add_argument("--config", default="config.json")
-    parser.add_argument("--num-envs", type=int, default=512)
+    parser.add_argument("--num-envs", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=100000)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--eval-games", type=int, default=100)
     parser.add_argument("--shaping", action="store_true", default=True)
     parser.add_argument("--no-shaping", dest="shaping", action="store_false")
-    parser.add_argument("--ppo-epochs", type=int, default=2,
+    parser.add_argument("--ppo-epochs", type=int, default=3,
                         help="Mini-batch epochs per rollout")
-    parser.add_argument("--mini-batch-size", type=int, default=2048)
-    parser.add_argument("--rollout-length", type=int, default=128)
+    parser.add_argument("--mini-batch-size", type=int, default=1024)
+    parser.add_argument("--rollout-length", type=int, default=64)
     args = parser.parse_args()
 
     # Load config
