@@ -583,8 +583,8 @@ if __name__ == "__main__":
     print("  HEURISTIC MCTS (greedy rollouts, game score tree value)")
     print("=" * 60)
     agent_heuristic = MCTSHeuristicAgent(
-        num_simulations=100,
-        rollout_depth=10,
+        num_simulations=300,
+        rollout_depth=15,
         exploration=100.0,
     )
     module2 = InteractionModule(
