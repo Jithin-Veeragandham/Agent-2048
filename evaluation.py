@@ -6,18 +6,20 @@ from typing import Dict, List, Optional, Tuple
 class RewardFunction:
     """Composite reward function for evaluating 2048 board states.
 
-    Combines five components to capture both tile progress and
+    Combines six components to capture both tile progress and
     board structure quality.
 
     Components:
         - tile_score:      Weights higher tiles exponentially more
         - empty_bonus:     Rewards open + clustered empty cells
         - monotonicity:    Rewards decreasing gradient from corner (snake pattern)
+        - corner_bonus:    Rewards keeping max tile in a corner
         - merge_potential: Rewards adjacent same-value tile pairs
         - smoothness:      Penalizes large value gaps between neighbors
 
     Args:
-        weights: Dict with keys 'tile', 'empty', 'mono', 'merge', 'smooth'.
+        weights: Dict with keys 'tile', 'empty', 'mono', 'corner',
+            'merge', 'smooth'.
             Defaults are tuned for a 4×4 board. Override for experimentation.
 
     Example::
@@ -27,16 +29,18 @@ class RewardFunction:
 
         # Custom weights for search agents
         rf_search = RewardFunction(weights={
-            'tile': 1.0, 'empty': 0.5, 'mono': 1.0,
-            'merge': 0.5, 'smooth': 0.3
+            'tile': 1.0, 'empty': 0.5, 'mono': 2.5,
+            'corner': 1.5, 'merge': 0.5, 'smooth': 0.1
         })
     """
 
     DEFAULT_WEIGHTS = {
         'tile':   1.0,
         'empty':  0.5,
+        'mono':   2.5,
+        'corner': 1.5,
         'merge':  0.5,
-        'smooth': 0.3,
+        'smooth': 0.1,
     }
 
     def __init__(self, weights: Optional[Dict[str, float]] = None):
@@ -95,7 +99,92 @@ class RewardFunction:
 
         return float(count_score + adjacency)
 
-    
+    @staticmethod
+    def monotonicity(board: np.ndarray) -> float:
+        """Penalizes non-monotonic rows and columns using cubic tile values.
+
+        For each row and column, computes both left-to-right and
+        right-to-left monotonicity, and takes the better (less
+        penalizing) direction. Uses cube of tile rank so that
+        high-value tiles out of order are punished far more severely
+        than low-value tiles.
+
+        Inspired by nneonneo/xificurk's 2048-ai approach.
+
+        Args:
+            board: 2D numpy array of tile values.
+
+        Returns:
+            float: Monotonicity penalty (negative; closer to 0 = better).
+        """
+        MONO_POWER = 3.0
+        rows, cols = board.shape
+
+        # Convert to ranks (log2 values), 0 stays 0
+        ranks = np.zeros_like(board, dtype=float)
+        mask = board > 0
+        ranks[mask] = np.log2(board[mask].astype(float))
+
+        penalty = 0.0
+
+        # Evaluate each row: pick better of left-monotonic vs right-monotonic
+        for r in range(rows):
+            mono_left = 0.0
+            mono_right = 0.0
+            for c in range(1, cols):
+                if ranks[r, c - 1] > ranks[r, c]:
+                    # Decreasing left-to-right: penalize right-monotonicity
+                    mono_right += pow(ranks[r, c - 1], MONO_POWER) - pow(ranks[r, c], MONO_POWER)
+                elif ranks[r, c] > ranks[r, c - 1]:
+                    # Increasing left-to-right: penalize left-monotonicity
+                    mono_left += pow(ranks[r, c], MONO_POWER) - pow(ranks[r, c - 1], MONO_POWER)
+            penalty += min(mono_left, mono_right)
+
+        # Evaluate each column: pick better of up-monotonic vs down-monotonic
+        for c in range(cols):
+            mono_up = 0.0
+            mono_down = 0.0
+            for r in range(1, rows):
+                if ranks[r - 1, c] > ranks[r, c]:
+                    mono_down += pow(ranks[r - 1, c], MONO_POWER) - pow(ranks[r, c], MONO_POWER)
+                elif ranks[r, c] > ranks[r - 1, c]:
+                    mono_up += pow(ranks[r, c], MONO_POWER) - pow(ranks[r - 1, c], MONO_POWER)
+            penalty += min(mono_up, mono_down)
+
+        # Return negative penalty (higher = less penalty = better)
+        return -penalty
+
+    @staticmethod
+    def corner_bonus(board: np.ndarray) -> float:
+        """Penalizes the board when the max tile is not in the target corner.
+
+        Uses a squared penalty based on the difference between the
+        max tile value and the value at the target corner (top-left).
+        Inspired by gjdanis's 2048 AI — the penalty is harsh enough
+        that the agent will almost never voluntarily move the max
+        tile away from the corner.
+
+        If max tile is in the corner: penalty = 0 (best).
+        If max tile is elsewhere: penalty = -(max_val - corner_val)^2.
+
+        Args:
+            board: 2D numpy array of tile values.
+
+        Returns:
+            float: 0 if max tile is in corner, large negative otherwise.
+        """
+        max_val = int(np.max(board))
+        if max_val == 0:
+            return 0.0
+
+        # Target corner: top-left (0, 0)
+        corner_val = int(board[0, 0])
+
+        if corner_val == max_val:
+            return 0.0
+
+        # Squared penalty for max tile not being in the corner
+        return -float((max_val - corner_val) )
 
     @staticmethod
     def merge_potential(board: np.ndarray) -> float:
@@ -162,10 +251,10 @@ class RewardFunction:
     def compute(self, board: np.ndarray) -> float:
         """Compute the full composite reward for a board state.
 
-        R(s) = α·tile + β·empty + γ·mono + δ·merge - λ·smooth
+        R(s) = α·tile + β·empty + γ·mono + κ·corner + δ·merge - λ·smooth
 
-        Each component is normalized to [0, 1] range before weighting
-        to prevent any single term from dominating.
+        Each component is normalized before weighting to prevent
+        any single term from dominating.
 
         Args:
             board: 2D numpy array of tile values.
@@ -177,6 +266,8 @@ class RewardFunction:
 
         t = self.tile_score(board)
         e = self.empty_bonus(board)
+        mo = self.monotonicity(board)
+        co = self.corner_bonus(board)
         mp = self.merge_potential(board)
         s = self.smoothness(board)
 
@@ -185,12 +276,22 @@ class RewardFunction:
         max_tile = board.shape[0] ** 2
         t_norm = max(t / (2048 * 11 * max_tile), 1e-8)    # tile_score upper bound
         e_norm = max(e / (max_tile ** 2 + max_tile * 2), 1e-8)  # empty_bonus upper bound
+        # mono is a negative penalty; normalize by worst-case
+        mono_max = (11.0 ** 3) * max_tile  # MONO_POWER=3, max rank=11
+        mo_norm = mo / max(mono_max, 1)
+        max_val = np.max(board)
+        # Corner penalty is raw squared difference, normalize by max_val^2
+        # so it ranges from 0 (best) to -1 (worst: max tile far from corner)
+        # but use a softer denominator to avoid crushing early-game play
+        co_norm = co / max(float(max_val) ** 2, 1) if max_val > 0 else 0.0
         mp_norm = max(mp / (11 * max_tile), 1e-8)          # merge upper bound
         s_norm = max(s / (11 * max_tile * 2), 1e-8)        # smooth upper bound
 
         return (
             w['tile']   * t_norm
             + w['empty']  * e_norm
+            + w['mono']   * mo_norm
+            + w['corner'] * co_norm
             + w['merge']  * mp_norm
             - w['smooth'] * s_norm
         )
@@ -207,6 +308,8 @@ class RewardFunction:
         return {
             'tile_score':      self.tile_score(board),
             'empty_bonus':     self.empty_bonus(board),
+            'monotonicity':    self.monotonicity(board),
+            'corner_bonus':    self.corner_bonus(board),
             'merge_potential': self.merge_potential(board),
             'smoothness':      self.smoothness(board),
             'composite':       self.compute(board),
@@ -219,17 +322,20 @@ class RewardFunction:
 
 # Full shaping for search agents (MCTS, Beam Search)
 REWARD_SEARCH = RewardFunction(weights={
-    'tile': 1.0, 'empty': 0.5, 'mono': 1.0, 'merge': 0.5, 'smooth': 0.3
+    'tile': 1.0, 'empty': 0.5, 'mono': 2.5,
+    'corner': 1.5, 'merge': 0.5, 'smooth': 0.1
 })
 
 # Simplified for RL agents (DQN, PPO) — let the network learn structure
-REWARD_RL = RewardFunction(weights={
-    'tile': 1.0, 'empty': 0.3, 'mono': 0.0, 'merge': 0.0, 'smooth': 0.0
-})
+'''REWARD_RL = RewardFunction(weights={
+    'tile': 1.0, 'empty': 0.3, 'mono': 0.0, 'corner': 0.0,
+    'merge': 0.0, 'smooth': 0.0
+})'''
 
 # Minimal shaping for AlphaZero — value head learns evaluation
 '''REWARD_ALPHAZERO = RewardFunction(weights={
-    'tile': 1.0, 'empty': 0.1, 'mono': 0.0, 'merge': 0.0, 'smooth': 0.0
+    'tile': 1.0, 'empty': 0.1, 'mono': 0.0, 'corner': 0.0,
+    'merge': 0.0, 'smooth': 0.0
 })'''
 
 
