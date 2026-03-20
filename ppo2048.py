@@ -862,7 +862,7 @@ class PPOAgent(BaseAgent):
 #  CONVENIENCE
 # ═══════════════════════════════════════════════════════════════════
 
-def train_and_evaluate(config=None, grid_size=4, num_envs=128,
+'''def train_and_evaluate(config=None, grid_size=4, num_envs=128,
                        epochs=100000, eval_games=100,
                        save_path="ppo_model.pt"):
     from interaction import InteractionModule
@@ -884,8 +884,8 @@ def train_and_evaluate(config=None, grid_size=4, num_envs=128,
     )
 
     module.run(num_games=eval_games)
-    module.print_results()
-    module.save_results(f"ppo_{grid_size}x{grid_size}_results.json")
+    module.print_results()'''
+    #module.save_results(f"ppo_{grid_size}x{grid_size}_results.json")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -941,10 +941,12 @@ if __name__ == "__main__":
 
     elif args.mode == "eval":
         from interaction import InteractionModule
+        from utils import RunLogger
+        logger = RunLogger()
         agent = PPOAgent(
             model_path=args.model, grid_size=grid_size, deterministic=True
         )
-        module = InteractionModule(config, agent, verbose=True)
+        module = InteractionModule(config, agent, logger=logger, verbose=True, print_board=True)
         module.run(num_games=args.eval_games)
         module.print_results()
 
@@ -963,7 +965,9 @@ if __name__ == "__main__":
             model_path=args.model, grid_size=grid_size, deterministic=True
         )
         from interaction import InteractionModule
-        module = InteractionModule(config, agent, verbose=True)
+        from utils import RunLogger
+        logger = RunLogger()
+        module = InteractionModule(config, agent, logger=logger, verbose=True, print_board=True)
         module.set_training_stats(
             training_time_sec=sum(
                 h.get('time_sec', 0) for h in trainer.training_history
@@ -972,4 +976,4 @@ if __name__ == "__main__":
         )
         module.run(num_games=args.eval_games)
         module.print_results()
-        module.save_results(f"ppo_{grid_size}x{grid_size}_results.json")
+        #module.save_results(f"ppo_{grid_size}x{grid_size}_results.json")
