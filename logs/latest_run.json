@@ -1,0 +1,936 @@
+{
+  "run_id": "77cd3a46-0cf",
+  "timestamp": "2026-03-20T22:26:39.927109+00:00",
+  "agent": "PPO",
+  "agent_type": "agent",
+  "agent_params": {},
+  "config": {
+    "grid_size": 4,
+    "tile_2_probability": 0.9,
+    "initial_tiles": 2,
+    "random_seed": null,
+    "cell_size": 100,
+    "cell_padding": 10,
+    "animation_speed": 10
+  },
+  "reward_weights": {
+    "tile": 1.0,
+    "empty": 0.5,
+    "mono": 2.5,
+    "corner": 1.5,
+    "merge": 0.5,
+    "smooth": 0.1
+  },
+  "num_games": 10,
+  "games": [
+    {
+      "run_id": "77cd3a46-0cf",
+      "game_index": 0,
+      "num_games_in_run": 10,
+      "timestamp": "2026-03-20T22:25:39.918795+00:00",
+      "agent": "PPO",
+      "agent_params": {},
+      "config": {
+        "grid_size": 4,
+        "tile_2_probability": 0.9,
+        "initial_tiles": 2,
+        "random_seed": null,
+        "cell_size": 100,
+        "cell_padding": 10,
+        "animation_speed": 10
+      },
+      "reward_weights": {
+        "tile": 1.0,
+        "empty": 0.5,
+        "mono": 2.5,
+        "corner": 1.5,
+        "merge": 0.5,
+        "smooth": 0.1
+      },
+      "score": 16088,
+      "highest_tile": 1024,
+      "moves": 965,
+      "reached_2048": false,
+      "reached_4096": false,
+      "won": false,
+      "time_sec": 2.627,
+      "avg_inference_ms": 1.88,
+      "p50_inference_ms": 1.988,
+      "p95_inference_ms": 2.957,
+      "empty_cells": 0,
+      "tile_distribution": {
+        "2": 2,
+        "4": 3,
+        "8": 2,
+        "16": 1,
+        "32": 1,
+        "64": 2,
+        "128": 3,
+        "512": 1,
+        "1024": 1
+      },
+      "avg_reward_breakdown": {
+        "tile_score": 9119.533679,
+        "empty_bonus": 22.827979,
+        "monotonicity": -494.264249,
+        "corner_bonus": -641.548187,
+        "merge_potential": 3.37513,
+        "smoothness": 34.022798,
+        "composite": -0.003182
+      },
+      "final_reward_breakdown": {
+        "tile_score": 18604.0,
+        "empty_bonus": 0.0,
+        "monotonicity": -2441.0,
+        "corner_bonus": -1016.0,
+        "merge_potential": 0.0,
+        "smoothness": 70.0,
+        "composite": -0.256282
+      },
+      "final_board": [
+        [
+          8,
+          2,
+          4,
+          8
+        ],
+        [
+          128,
+          64,
+          32,
+          16
+        ],
+        [
+          2,
+          1024,
+          64,
+          128
+        ],
+        [
+          4,
+          512,
+          128,
+          4
+        ]
+      ]
+    },
+    {
+      "run_id": "77cd3a46-0cf",
+      "game_index": 1,
+      "num_games_in_run": 10,
+      "timestamp": "2026-03-20T22:25:40.745799+00:00",
+      "agent": "PPO",
+      "agent_params": {},
+      "config": {
+        "grid_size": 4,
+        "tile_2_probability": 0.9,
+        "initial_tiles": 2,
+        "random_seed": null,
+        "cell_size": 100,
+        "cell_padding": 10,
+        "animation_speed": 10
+      },
+      "reward_weights": {
+        "tile": 1.0,
+        "empty": 0.5,
+        "mono": 2.5,
+        "corner": 1.5,
+        "merge": 0.5,
+        "smooth": 0.1
+      },
+      "score": 4296,
+      "highest_tile": 512,
+      "moves": 283,
+      "reached_2048": false,
+      "reached_4096": false,
+      "won": false,
+      "time_sec": 0.825,
+      "avg_inference_ms": 1.895,
+      "p50_inference_ms": 1.993,
+      "p95_inference_ms": 3.011,
+      "empty_cells": 0,
+      "tile_distribution": {
+        "2": 4,
+        "4": 3,
+        "8": 4,
+        "16": 3,
+        "32": 1,
+        "512": 1
+      },
+      "avg_reward_breakdown": {
+        "tile_score": 2133.710247,
+        "empty_bonus": 33.961131,
+        "monotonicity": -237.424028,
+        "corner_bonus": -178.473498,
+        "merge_potential": 3.04947,
+        "smoothness": 24.159011,
+        "composite": 0.006209
+      },
+      "final_reward_breakdown": {
+        "tile_score": 5088.0,
+        "empty_bonus": 0.0,
+        "monotonicity": -223.0,
+        "corner_bonus": -510.0,
+        "merge_potential": 0.0,
+        "smoothness": 47.0,
+        "composite": -0.028333
+      },
+      "final_board": [
+        [
+          2,
+          4,
+          8,
+          4
+        ],
+        [
+          8,
+          2,
+          4,
+          16
+        ],
+        [
+          2,
+          8,
+          16,
+          2
+        ],
+        [
+          8,
+          16,
+          32,
+          512
+        ]
+      ]
+    },
+    {
+      "run_id": "77cd3a46-0cf",
+      "game_index": 2,
+      "num_games_in_run": 10,
+      "timestamp": "2026-03-20T22:25:44.635087+00:00",
+      "agent": "PPO",
+      "agent_params": {},
+      "config": {
+        "grid_size": 4,
+        "tile_2_probability": 0.9,
+        "initial_tiles": 2,
+        "random_seed": null,
+        "cell_size": 100,
+        "cell_padding": 10,
+        "animation_speed": 10
+      },
+      "reward_weights": {
+        "tile": 1.0,
+        "empty": 0.5,
+        "mono": 2.5,
+        "corner": 1.5,
+        "merge": 0.5,
+        "smooth": 0.1
+      },
+      "score": 29632,
+      "highest_tile": 2048,
+      "moves": 1465,
+      "reached_2048": true,
+      "reached_4096": false,
+      "won": true,
+      "time_sec": 3.886,
+      "avg_inference_ms": 1.767,
+      "p50_inference_ms": 1.991,
+      "p95_inference_ms": 3.0,
+      "empty_cells": 0,
+      "tile_distribution": {
+        "2": 4,
+        "4": 3,
+        "8": 3,
+        "16": 3,
+        "64": 1,
+        "1024": 1,
+        "2048": 1
+      },
+      "avg_reward_breakdown": {
+        "tile_score": 15408.675768,
+        "empty_bonus": 21.931741,
+        "monotonicity": -141.128328,
+        "corner_bonus": -1125.806143,
+        "merge_potential": 3.365188,
+        "smoothness": 32.463481,
+        "composite": 0.05646
+      },
+      "final_reward_breakdown": {
+        "tile_score": 33448.0,
+        "empty_bonus": 0.0,
+        "monotonicity": -378.0,
+        "corner_bonus": -2044.0,
+        "merge_potential": 0.0,
+        "smoothness": 56.0,
+        "composite": 0.031781
+      },
+      "final_board": [
+        [
+          4,
+          2,
+          4,
+          2
+        ],
+        [
+          2,
+          8,
+          16,
+          8
+        ],
+        [
+          16,
+          64,
+          4,
+          16
+        ],
+        [
+          2048,
+          1024,
+          8,
+          2
+        ]
+      ]
+    },
+    {
+      "run_id": "77cd3a46-0cf",
+      "game_index": 3,
+      "num_games_in_run": 10,
+      "timestamp": "2026-03-20T22:25:53.640556+00:00",
+      "agent": "PPO",
+      "agent_params": {},
+      "config": {
+        "grid_size": 4,
+        "tile_2_probability": 0.9,
+        "initial_tiles": 2,
+        "random_seed": null,
+        "cell_size": 100,
+        "cell_padding": 10,
+        "animation_speed": 10
+      },
+      "reward_weights": {
+        "tile": 1.0,
+        "empty": 0.5,
+        "mono": 2.5,
+        "corner": 1.5,
+        "merge": 0.5,
+        "smooth": 0.1
+      },
+      "score": 78256,
+      "highest_tile": 4096,
+      "moves": 3574,
+      "reached_2048": true,
+      "reached_4096": true,
+      "won": true,
+      "time_sec": 9.0,
+      "avg_inference_ms": 1.681,
+      "p50_inference_ms": 1.982,
+      "p95_inference_ms": 2.986,
+      "empty_cells": 0,
+      "tile_distribution": {
+        "2": 2,
+        "4": 2,
+        "8": 3,
+        "16": 2,
+        "32": 1,
+        "64": 2,
+        "512": 1,
+        "1024": 1,
+        "2048": 1,
+        "4096": 1
+      },
+      "avg_reward_breakdown": {
+        "tile_score": 43173.837157,
+        "empty_bonus": 16.510632,
+        "monotonicity": -184.047846,
+        "corner_bonus": -2652.655848,
+        "merge_potential": 3.223559,
+        "smoothness": 39.224119,
+        "composite": 0.121979
+      },
+      "final_reward_breakdown": {
+        "tile_score": 87676.0,
+        "empty_bonus": 0.0,
+        "monotonicity": -838.0,
+        "corner_bonus": -4094.0,
+        "merge_potential": 0.0,
+        "smoothness": 62.0,
+        "composite": 0.126887
+      },
+      "final_board": [
+        [
+          2,
+          4,
+          8,
+          4
+        ],
+        [
+          8,
+          32,
+          16,
+          8
+        ],
+        [
+          16,
+          64,
+          512,
+          64
+        ],
+        [
+          4096,
+          2048,
+          1024,
+          2
+        ]
+      ]
+    },
+    {
+      "run_id": "77cd3a46-0cf",
+      "game_index": 4,
+      "num_games_in_run": 10,
+      "timestamp": "2026-03-20T22:25:56.597787+00:00",
+      "agent": "PPO",
+      "agent_params": {},
+      "config": {
+        "grid_size": 4,
+        "tile_2_probability": 0.9,
+        "initial_tiles": 2,
+        "random_seed": null,
+        "cell_size": 100,
+        "cell_padding": 10,
+        "animation_speed": 10
+      },
+      "reward_weights": {
+        "tile": 1.0,
+        "empty": 0.5,
+        "mono": 2.5,
+        "corner": 1.5,
+        "merge": 0.5,
+        "smooth": 0.1
+      },
+      "score": 22032,
+      "highest_tile": 2048,
+      "moves": 1123,
+      "reached_2048": true,
+      "reached_4096": false,
+      "won": true,
+      "time_sec": 2.954,
+      "avg_inference_ms": 1.769,
+      "p50_inference_ms": 1.991,
+      "p95_inference_ms": 3.001,
+      "empty_cells": 0,
+      "tile_distribution": {
+        "2": 3,
+        "4": 2,
+        "8": 2,
+        "16": 1,
+        "32": 4,
+        "64": 2,
+        "128": 1,
+        "2048": 1
+      },
+      "avg_reward_breakdown": {
+        "tile_score": 11321.816563,
+        "empty_bonus": 21.13179,
+        "monotonicity": -133.281389,
+        "corner_bonus": -850.381122,
+        "merge_potential": 3.456812,
+        "smoothness": 31.416741,
+        "composite": 0.042263
+      },
+      "final_reward_breakdown": {
+        "tile_score": 24966.0,
+        "empty_bonus": 0.0,
+        "monotonicity": -1796.0,
+        "corner_bonus": -2044.0,
+        "merge_potential": 0.0,
+        "smoothness": 66.0,
+        "composite": -0.161055
+      },
+      "final_board": [
+        [
+          4,
+          2,
+          4,
+          8
+        ],
+        [
+          32,
+          8,
+          32,
+          16
+        ],
+        [
+          2048,
+          2,
+          64,
+          32
+        ],
+        [
+          2,
+          32,
+          128,
+          64
+        ]
+      ]
+    },
+    {
+      "run_id": "77cd3a46-0cf",
+      "game_index": 5,
+      "num_games_in_run": 10,
+      "timestamp": "2026-03-20T22:26:01.373887+00:00",
+      "agent": "PPO",
+      "agent_params": {},
+      "config": {
+        "grid_size": 4,
+        "tile_2_probability": 0.9,
+        "initial_tiles": 2,
+        "random_seed": null,
+        "cell_size": 100,
+        "cell_padding": 10,
+        "animation_speed": 10
+      },
+      "reward_weights": {
+        "tile": 1.0,
+        "empty": 0.5,
+        "mono": 2.5,
+        "corner": 1.5,
+        "merge": 0.5,
+        "smooth": 0.1
+      },
+      "score": 32660,
+      "highest_tile": 2048,
+      "moves": 1690,
+      "reached_2048": true,
+      "reached_4096": false,
+      "won": true,
+      "time_sec": 4.772,
+      "avg_inference_ms": 1.91,
+      "p50_inference_ms": 1.995,
+      "p95_inference_ms": 3.021,
+      "empty_cells": 0,
+      "tile_distribution": {
+        "2": 2,
+        "4": 1,
+        "8": 2,
+        "16": 3,
+        "32": 2,
+        "64": 2,
+        "128": 1,
+        "256": 1,
+        "1024": 1,
+        "2048": 1
+      },
+      "avg_reward_breakdown": {
+        "tile_score": 17886.260355,
+        "empty_bonus": 17.805325,
+        "monotonicity": -651.531361,
+        "corner_bonus": -1224.298225,
+        "merge_potential": 3.172189,
+        "smoothness": 36.805917,
+        "composite": -0.004231
+      },
+      "final_reward_breakdown": {
+        "tile_score": 37052.0,
+        "empty_bonus": 0.0,
+        "monotonicity": -2281.0,
+        "corner_bonus": -2046.0,
+        "merge_potential": 0.0,
+        "smoothness": 53.0,
+        "composite": -0.180768
+      },
+      "final_board": [
+        [
+          2,
+          8,
+          4,
+          2
+        ],
+        [
+          16,
+          32,
+          16,
+          8
+        ],
+        [
+          32,
+          64,
+          2048,
+          16
+        ],
+        [
+          64,
+          256,
+          1024,
+          128
+        ]
+      ]
+    },
+    {
+      "run_id": "77cd3a46-0cf",
+      "game_index": 6,
+      "num_games_in_run": 10,
+      "timestamp": "2026-03-20T22:26:09.059161+00:00",
+      "agent": "PPO",
+      "agent_params": {},
+      "config": {
+        "grid_size": 4,
+        "tile_2_probability": 0.9,
+        "initial_tiles": 2,
+        "random_seed": null,
+        "cell_size": 100,
+        "cell_padding": 10,
+        "animation_speed": 10
+      },
+      "reward_weights": {
+        "tile": 1.0,
+        "empty": 0.5,
+        "mono": 2.5,
+        "corner": 1.5,
+        "merge": 0.5,
+        "smooth": 0.1
+      },
+      "score": 60180,
+      "highest_tile": 4096,
+      "moves": 2800,
+      "reached_2048": true,
+      "reached_4096": true,
+      "won": true,
+      "time_sec": 7.676,
+      "avg_inference_ms": 1.825,
+      "p50_inference_ms": 1.994,
+      "p95_inference_ms": 3.0,
+      "empty_cells": 0,
+      "tile_distribution": {
+        "2": 2,
+        "4": 3,
+        "8": 3,
+        "16": 2,
+        "32": 1,
+        "128": 1,
+        "256": 1,
+        "512": 1,
+        "1024": 1,
+        "4096": 1
+      },
+      "avg_reward_breakdown": {
+        "tile_score": 32532.722143,
+        "empty_bonus": 16.882143,
+        "monotonicity": -254.363929,
+        "corner_bonus": -2232.48,
+        "merge_potential": 3.198571,
+        "smoothness": 37.846429,
+        "composite": 0.083743
+      },
+      "final_reward_breakdown": {
+        "tile_score": 67332.0,
+        "empty_bonus": 0.0,
+        "monotonicity": -2494.0,
+        "corner_bonus": -4088.0,
+        "merge_potential": 0.0,
+        "smoothness": 80.0,
+        "composite": -0.12907
+      },
+      "final_board": [
+        [
+          8,
+          4,
+          2,
+          8
+        ],
+        [
+          16,
+          32,
+          8,
+          128
+        ],
+        [
+          4,
+          16,
+          512,
+          4
+        ],
+        [
+          256,
+          4096,
+          1024,
+          2
+        ]
+      ]
+    },
+    {
+      "run_id": "77cd3a46-0cf",
+      "game_index": 7,
+      "num_games_in_run": 10,
+      "timestamp": "2026-03-20T22:26:18.398050+00:00",
+      "agent": "PPO",
+      "agent_params": {},
+      "config": {
+        "grid_size": 4,
+        "tile_2_probability": 0.9,
+        "initial_tiles": 2,
+        "random_seed": null,
+        "cell_size": 100,
+        "cell_padding": 10,
+        "animation_speed": 10
+      },
+      "reward_weights": {
+        "tile": 1.0,
+        "empty": 0.5,
+        "mono": 2.5,
+        "corner": 1.5,
+        "merge": 0.5,
+        "smooth": 0.1
+      },
+      "score": 34396,
+      "highest_tile": 2048,
+      "moves": 1748,
+      "reached_2048": true,
+      "reached_4096": false,
+      "won": true,
+      "time_sec": 9.334,
+      "avg_inference_ms": 3.452,
+      "p50_inference_ms": 3.933,
+      "p95_inference_ms": 5.007,
+      "empty_cells": 0,
+      "tile_distribution": {
+        "2": 2,
+        "4": 5,
+        "8": 1,
+        "16": 2,
+        "32": 1,
+        "64": 1,
+        "128": 1,
+        "512": 1,
+        "1024": 1,
+        "2048": 1
+      },
+      "avg_reward_breakdown": {
+        "tile_score": 18561.139588,
+        "empty_bonus": 16.879291,
+        "monotonicity": -693.701373,
+        "corner_bonus": -1229.58238,
+        "merge_potential": 3.215675,
+        "smoothness": 37.47254,
+        "composite": -0.008464
+      },
+      "final_reward_breakdown": {
+        "tile_score": 39012.0,
+        "empty_bonus": 0.0,
+        "monotonicity": -3390.0,
+        "corner_bonus": -2044.0,
+        "merge_potential": 0.0,
+        "smoothness": 69.0,
+        "composite": -0.310063
+      },
+      "final_board": [
+        [
+          4,
+          2,
+          4,
+          2
+        ],
+        [
+          16,
+          32,
+          16,
+          4
+        ],
+        [
+          64,
+          2048,
+          512,
+          8
+        ],
+        [
+          4,
+          128,
+          1024,
+          4
+        ]
+      ]
+    },
+    {
+      "run_id": "77cd3a46-0cf",
+      "game_index": 8,
+      "num_games_in_run": 10,
+      "timestamp": "2026-03-20T22:26:29.574324+00:00",
+      "agent": "PPO",
+      "agent_params": {},
+      "config": {
+        "grid_size": 4,
+        "tile_2_probability": 0.9,
+        "initial_tiles": 2,
+        "random_seed": null,
+        "cell_size": 100,
+        "cell_padding": 10,
+        "animation_speed": 10
+      },
+      "reward_weights": {
+        "tile": 1.0,
+        "empty": 0.5,
+        "mono": 2.5,
+        "corner": 1.5,
+        "merge": 0.5,
+        "smooth": 0.1
+      },
+      "score": 35616,
+      "highest_tile": 2048,
+      "moves": 1832,
+      "reached_2048": true,
+      "reached_4096": false,
+      "won": true,
+      "time_sec": 11.166,
+      "avg_inference_ms": 3.938,
+      "p50_inference_ms": 4.001,
+      "p95_inference_ms": 5.514,
+      "empty_cells": 0,
+      "tile_distribution": {
+        "2": 1,
+        "4": 5,
+        "8": 3,
+        "16": 1,
+        "64": 2,
+        "256": 1,
+        "512": 1,
+        "1024": 1,
+        "2048": 1
+      },
+      "avg_reward_breakdown": {
+        "tile_score": 19786.120087,
+        "empty_bonus": 19.70524,
+        "monotonicity": -453.362991,
+        "corner_bonus": -1308.414847,
+        "merge_potential": 3.205786,
+        "smoothness": 37.966157,
+        "composite": 0.028611
+      },
+      "final_reward_breakdown": {
+        "tile_score": 40370.0,
+        "empty_bonus": 0.0,
+        "monotonicity": -2419.0,
+        "corner_bonus": -2046.0,
+        "merge_potential": 0.0,
+        "smoothness": 82.0,
+        "composite": -0.196001
+      },
+      "final_board": [
+        [
+          2,
+          4,
+          8,
+          4
+        ],
+        [
+          8,
+          16,
+          64,
+          8
+        ],
+        [
+          4,
+          64,
+          1024,
+          256
+        ],
+        [
+          2048,
+          4,
+          512,
+          4
+        ]
+      ]
+    },
+    {
+      "run_id": "77cd3a46-0cf",
+      "game_index": 9,
+      "num_games_in_run": 10,
+      "timestamp": "2026-03-20T22:26:39.921108+00:00",
+      "agent": "PPO",
+      "agent_params": {},
+      "config": {
+        "grid_size": 4,
+        "tile_2_probability": 0.9,
+        "initial_tiles": 2,
+        "random_seed": null,
+        "cell_size": 100,
+        "cell_padding": 10,
+        "animation_speed": 10
+      },
+      "reward_weights": {
+        "tile": 1.0,
+        "empty": 0.5,
+        "mono": 2.5,
+        "corner": 1.5,
+        "merge": 0.5,
+        "smooth": 0.1
+      },
+      "score": 59916,
+      "highest_tile": 4096,
+      "moves": 2734,
+      "reached_2048": true,
+      "reached_4096": true,
+      "won": true,
+      "time_sec": 10.336,
+      "avg_inference_ms": 2.324,
+      "p50_inference_ms": 2.012,
+      "p95_inference_ms": 4.006,
+      "empty_cells": 0,
+      "tile_distribution": {
+        "2": 3,
+        "4": 2,
+        "8": 3,
+        "16": 2,
+        "32": 1,
+        "128": 1,
+        "256": 1,
+        "512": 1,
+        "1024": 1,
+        "4096": 1
+      },
+      "avg_reward_breakdown": {
+        "tile_score": 32418.771031,
+        "empty_bonus": 16.658742,
+        "monotonicity": -131.010973,
+        "corner_bonus": -2201.032187,
+        "merge_potential": 3.297001,
+        "smoothness": 37.246891,
+        "composite": 0.09802
+      },
+      "final_reward_breakdown": {
+        "tile_score": 67326.0,
+        "empty_bonus": 0.0,
+        "monotonicity": -796.0,
+        "corner_bonus": -4088.0,
+        "merge_potential": 0.0,
+        "smoothness": 78.0,
+        "composite": 0.070815
+      },
+      "final_board": [
+        [
+          8,
+          4,
+          2,
+          4
+        ],
+        [
+          16,
+          32,
+          8,
+          128
+        ],
+        [
+          8,
+          16,
+          2,
+          256
+        ],
+        [
+          4096,
+          1024,
+          512,
+          2
+        ]
+      ]
+    }
+  ]
+}

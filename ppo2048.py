@@ -255,10 +255,11 @@ def compute_gae_advantages(
 
 # ── Default weights (matching evaluation.py's RewardFunction.DEFAULT_WEIGHTS)
 SHAPING_WEIGHTS = {
-    'tile':   1.0,
-    'empty':  0.5,
-    'merge':  0.5,
-    'smooth': 0.3,
+        'tile':   1.0,
+        'empty':  0.5,
+        'mono':   2.5,
+        'merge':  0.5,
+        'smooth': 0.1,
 }
 
 
@@ -359,6 +360,46 @@ def _smoothness_batch(boards: torch.Tensor) -> torch.Tensor:
 
     return h_penalty + v_penalty                                # (N,)
 
+def _monotonicity_batch(boards: torch.Tensor) -> torch.Tensor:
+    """Batched monotonicity: reward for consistent value gradients per row/col.
+ 
+    For each row, computes how well values decrease left-to-right vs
+    right-to-left, picks the better direction, and sums. Same for columns.
+    Uses log₂ scale so tile magnitude differences are proportional.
+ 
+    Matches evaluation.py's RewardFunction.monotonicity() but batched on GPU.
+ 
+    Args:
+        boards: (N, grid, grid) int tensor
+ 
+    Returns:
+        (N,) float tensor — monotonicity score (higher = more monotonic)
+    """
+    flat_f = boards.float()
+    log_board = torch.zeros_like(flat_f)
+    nonzero = flat_f > 0
+    log_board[nonzero] = torch.log2(flat_f[nonzero])
+ 
+    # ── Horizontal: per-row best direction ──
+    h_diff = log_board[:, :, :-1] - log_board[:, :, 1:]        # (N, H, W-1)
+    h_both = (boards[:, :, :-1] > 0) & (boards[:, :, 1:] > 0) # both non-zero
+    h_diff_masked = h_diff * h_both.float()
+ 
+    # Per-row: sum positive diffs (left > right) and negative diffs (right > left)
+    h_left = F.relu(h_diff_masked).sum(dim=2)                  # (N, H)
+    h_right = F.relu(-h_diff_masked).sum(dim=2)                # (N, H)
+    h_mono = torch.max(h_left, h_right).sum(dim=1)             # (N,)
+ 
+    # ── Vertical: per-column best direction ──
+    v_diff = log_board[:, :-1, :] - log_board[:, 1:, :]        # (N, H-1, W)
+    v_both = (boards[:, :-1, :] > 0) & (boards[:, 1:, :] > 0)
+    v_diff_masked = v_diff * v_both.float()
+ 
+    v_up = F.relu(v_diff_masked).sum(dim=1)                    # (N, W)
+    v_down = F.relu(-v_diff_masked).sum(dim=1)                 # (N, W)
+    v_mono = torch.max(v_up, v_down).sum(dim=1)                # (N,)
+ 
+    return h_mono + v_mono   
 
 def _heuristic_value(boards: torch.Tensor,
                      weights: dict = SHAPING_WEIGHTS) -> torch.Tensor:
@@ -379,17 +420,20 @@ def _heuristic_value(boards: torch.Tensor,
 
     t = _tile_score_batch(boards)
     e = _empty_bonus_batch(boards)
+    mo = _monotonicity_batch(boards)
     m = _merge_potential_batch(boards)
     s = _smoothness_batch(boards)
 
     # Normalization constants (matching evaluation.py)
     t_norm = t / (2048.0 * 11.0 * max_cells + 1e-8)
     e_norm = e / (max_cells ** 2 + max_cells * 2.0 + 1e-8)
+    mo_norm = mo / (11.0 * max_cells + 1e-8)
     m_norm = m / (11.0 * max_cells + 1e-8)
     s_norm = s / (11.0 * max_cells * 2.0 + 1e-8)
 
     return (weights['tile'] * t_norm
             + weights['empty'] * e_norm
+            + weights['mono'] * mo_norm
             + weights['merge'] * m_norm
             - weights['smooth'] * s_norm)
 
@@ -946,8 +990,8 @@ if __name__ == "__main__":
         agent = PPOAgent(
             model_path=args.model, grid_size=grid_size, deterministic=True
         )
-        module = InteractionModule(config, agent, logger=logger, verbose=True, print_board=True)
-        module.run(num_games=args.eval_games)
+        module = InteractionModule(config=config, agent=agent, logger=logger, verbose=True, print_board=True)
+        module.run(num_games=10)
         module.print_results()
 
     elif args.mode == "full":
