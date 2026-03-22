@@ -783,7 +783,7 @@ class PPOTrainer:
 
             # ── Checkpoint ──
             if ep % checkpoint_interval == 0 and ep > 0:
-                ckpt_path = f"models_2.0/ppo_ep{ep}.pt"
+                ckpt_path = f"models/ppo_ep{ep}.pt"
                 self.save_model(ckpt_path)
 
         total_time = time.time() - start_time
@@ -798,6 +798,7 @@ class PPOTrainer:
             self.save_model(save_path)
 
     def save_model(self, path: str):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save({
             'model_state_dict': self.network.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
@@ -990,8 +991,8 @@ if __name__ == "__main__":
         agent = PPOAgent(
             model_path=args.model, grid_size=grid_size, deterministic=True
         )
-        module = InteractionModule(config=config, agent=agent, logger=logger, verbose=True, print_board=True)
-        module.run(num_games=10)
+        module = InteractionModule(config=config, agent=agent, logger=logger, verbose=True)
+        module.run(num_games=args.eval_games)
         module.print_results()
 
     elif args.mode == "full":
