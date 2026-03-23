@@ -23,5 +23,5 @@ env/
 Thumbs.db
 .DS_Store
 logs/
-results/
+
 archive/
