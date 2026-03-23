@@ -1,0 +1,590 @@
+"""
+mcts.py
+=======
+
+Monte Carlo Tree Search agents for 2048.
+
+Two variants:
+    - MCTSAgent:          Classic MCTS with random rollouts.
+    - MCTSHeuristicAgent: Optimized MCTS — heuristic-guided rollouts
+                          with game score as tree value (matching the
+                          approach from thomasahle/mcts-2048 and
+                          chadpalmer2/2048_mcts).
+
+Key design: the heuristic guides rollout MOVE SELECTION, but the
+value backpropagated through the tree is the raw game score — not
+the heuristic value. This gives UCB1 large, well-separated values
+to work with, while the heuristic steers simulations toward good
+board states.
+
+Usage::
+
+    from agents.mcts import MCTSAgent, MCTSHeuristicAgent
+    from framework.interaction import InteractionModule
+    from framework.logger import RunLogger
+
+    agent = MCTSHeuristicAgent(num_simulations=500, rollout_depth=10)
+
+    logger = RunLogger()
+    module = InteractionModule(
+        config={"grid_size": 4, "random_seed": 42},
+        agent=agent,
+        logger=logger,
+        verbose=True,
+    )
+    module.run(num_games=1)
+    module.print_results()
+"""
+
+import math
+import numpy as np
+from typing import Dict, List, Optional, Any
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+from game import Game2048, Action
+
+try:
+    from framework.evaluation import RewardFunction
+except ImportError:
+    RewardFunction = None
+
+from agents.base import BaseAgent
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  PRECOMPUTED WEIGHT MATRICES (built once, reused every call)
+# ═══════════════════════════════════════════════════════════════════
+
+_SNAKE_CACHE: Dict[tuple, np.ndarray] = {}
+
+
+def _get_snake_weights(rows: int, cols: int) -> np.ndarray:
+    """Get normalized snake-pattern weight matrix, cached by grid size."""
+    key = (rows, cols)
+    if key not in _SNAKE_CACHE:
+        n = rows * cols
+        weights = np.zeros((rows, cols), dtype=float)
+        idx = 0
+        for r in range(rows):
+            row_range = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
+            for c in row_range:
+                weights[r, c] = 4.0 ** (n - 1 - idx)
+                idx += 1
+        _SNAKE_CACHE[key] = weights / np.max(weights)
+    return _SNAKE_CACHE[key]
+
+
+# Eagerly warm the 4×4 cache at import time
+_get_snake_weights(4, 4)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  HEURISTIC EVALUATION (for rollout move selection only)
+# ═══════════════════════════════════════════════════════════════════
+
+def _default_heuristic(board: np.ndarray) -> float:
+    """Composite heuristic for guiding rollout move selection.
+
+    Uses CMA-ES tuned weights (gen 90, beam search w=10 d=5, 80% win rate).
+    Snake weight matrix is precomputed and cached. log_board is computed
+    once and shared across all components.
+
+    Components: tile_score, empty_bonus, monotonicity (snake pattern),
+    merge_potential, smoothness penalty.
+    """
+    rows, cols = board.shape
+    n = rows * cols
+
+    # ── Shared log board (used by tile, mono, merge, smooth) ──
+    mask = board > 0
+    log_board = np.zeros_like(board, dtype=float)
+    log_board[mask] = np.log2(board[mask].astype(float))
+
+    # ── Tile score ────────────────────────────────────────────
+    tile = float(np.sum(board[mask].astype(float) * log_board[mask]))
+
+    # ── Empty bonus (vectorized adjacency) ────────────────────
+    empty_mask = ~mask
+    empty_count = int(np.sum(empty_mask))
+    horiz = int(np.sum(empty_mask[:, :-1] & empty_mask[:, 1:]))
+    vert = int(np.sum(empty_mask[:-1, :] & empty_mask[1:, :]))
+    empty = float(empty_count ** 2 + horiz + vert)
+
+    # ── Monotonicity (snake pattern, cached weights) ──────────
+    mono = float(np.sum(log_board * _get_snake_weights(rows, cols)))
+
+    # ── Merge potential (vectorized) ──────────────────────────
+    h_match = (board[:, :-1] == board[:, 1:]) & (board[:, :-1] > 0)
+    v_match = (board[:-1, :] == board[1:, :]) & (board[:-1, :] > 0)
+    merge = float(np.sum(log_board[:, :-1][h_match]) + np.sum(log_board[:-1, :][v_match]))
+
+    # ── Smoothness (vectorized) ───────────────────────────────
+    h_both = mask[:, :-1] & mask[:, 1:]
+    v_both = mask[:-1, :] & mask[1:, :]
+    smooth = float(
+        np.sum(np.abs(log_board[:, :-1] - log_board[:, 1:])[h_both])
+        + np.sum(np.abs(log_board[:-1, :] - log_board[1:, :])[v_both])
+    )
+
+    # ── Normalize & combine (CMA-ES tuned, gen 90) ───────────
+    t_norm = tile / max(2048 * 11 * n, 1)
+    e_norm = empty / max(n ** 2 + n * 2, 1)
+    m_norm = mono / max(11 * n, 1)
+    mp_norm = merge / max(11 * n, 1)
+    s_norm = smooth / max(11 * n * 2, 1)
+
+    return (
+        1.9708 * t_norm
+        + 1.2888 * e_norm
+        + 1.6159 * m_norm
+        + 1.9457 * mp_norm
+        - 1.3083 * s_norm
+    )
+
+
+def _tree_value(game: Game2048) -> float:
+    """Compute the value to backpropagate through the MCTS tree.
+
+    Returns the raw game score — matching poomstas/2048_MCTS's
+    state.get_result() which returns the cumulative merge score.
+
+    Simple, fast, and gives UCB1 well-separated values in the
+    thousands range.
+    """
+    return float(game.get_score())
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  SHARED: resolve rollout policy function
+# ═══════════════════════════════════════════════════════════════════
+
+def _resolve_rollout_policy(eval_fn=None, reward_fn=None):
+    """Pick the best available rollout policy function.
+
+    This function is used to SELECT MOVES during rollouts, not
+    to compute tree values. Defaults to the fast _default_heuristic
+    (CMA-ES tuned) rather than the heavier RewardFunction class.
+    """
+    if reward_fn is not None:
+        return reward_fn.compute
+    if eval_fn is not None:
+        return eval_fn
+    return _default_heuristic
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  PARALLEL ROLLOUT WORKERS (top-level for pickling)
+# ═══════════════════════════════════════════════════════════════════
+
+def _worker_random_rollout(board, score, rollout_depth, tile_2_prob):
+    """Random rollout worker. Returns game score."""
+    sim = Game2048.from_state(board, score=score, config={
+        'tile_2_probability': tile_2_prob,
+    })
+    for _ in range(rollout_depth):
+        if sim.is_game_over():
+            break
+        moves = sim.get_available_moves()
+        if not moves:
+            break
+        sim.move_fast(moves[np.random.randint(len(moves))])
+    return float(sim.get_score())
+
+
+def _worker_greedy_rollout(board, score, rollout_depth, tile_2_prob):
+    """Greedy heuristic rollout worker. Returns game score."""
+    sim = Game2048.from_state(board, score=score, config={
+        'tile_2_probability': tile_2_prob,
+    })
+    for _ in range(rollout_depth):
+        if sim.is_game_over():
+            break
+        moves = sim.get_available_moves()
+        if not moves:
+            break
+
+        best_h = -float('inf')
+        best_move = moves[0]
+        for move in moves:
+            child = sim.clone()
+            child.move_fast(move)
+            h = _default_heuristic(child.board)
+            if h > best_h:
+                best_h = h
+                best_move = move
+
+        sim.move_fast(best_move)
+
+    return float(sim.get_score())
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  MCTS NODE (shared by both agents)
+# ═══════════════════════════════════════════════════════════════════
+
+class MCTSNode:
+    """A single node in the MCTS search tree."""
+
+    __slots__ = ('game', 'parent', 'action', 'children',
+                 'visits', 'value', 'untried', '_terminal')
+
+    def __init__(self, game, parent=None, action=None):
+        self.game = game
+        self.parent = parent
+        self.action = action
+        self.children: Dict[Action, 'MCTSNode'] = {}
+        self.visits = 0
+        self.value = 0.0
+        self.untried: List[Action] = game.get_available_moves()
+        self._terminal: bool = game.is_game_over() or len(self.untried) == 0
+
+    @property
+    def is_fully_expanded(self):
+        return len(self.untried) == 0
+
+    @property
+    def is_terminal(self):
+        return self._terminal
+
+    def ucb1(self, c, min_val=0.0, max_val=1.0):
+        if self.visits == 0 or self.parent is None:
+            return float('inf')
+        avg = self.value / self.visits
+        if max_val > min_val:
+            avg = (avg - min_val) / (max_val - min_val)
+        return avg + c * math.sqrt(math.log(self.parent.visits) / self.visits)
+
+    def best_child(self, c, min_val=0.0, max_val=1.0):
+        return max(self.children.values(), key=lambda ch: ch.ucb1(c, min_val, max_val))
+
+    def expand(self):
+        action = self.untried.pop()
+        child_game = self.game.clone()
+        child_game.move_fast(action)
+        child = MCTSNode(child_game, parent=self, action=action)
+        self.children[action] = child
+        return child
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  CLASSIC MCTS — random rollouts
+# ═══════════════════════════════════════════════════════════════════
+
+class MCTSAgent(BaseAgent):
+    """Classic MCTS with random rollouts.
+
+    Rollouts play random moves, tree values use raw game score.
+
+    Args:
+        num_simulations: MCTS iterations per move decision.
+        rollout_depth:   Max random moves per rollout.
+        exploration:     UCB1 exploration constant.
+        num_workers:     Parallel rollout workers. 1 = sequential.
+
+    Example::
+
+        agent = MCTSAgent(num_simulations=500, rollout_depth=20)
+    """
+
+    agent_type = "mcts"
+
+    def __init__(
+        self,
+        num_simulations: int = 200,
+        rollout_depth: int = 10,
+        exploration: float = math.sqrt(2),
+        num_workers: int = 1,
+    ):
+        super().__init__(f"MCTS(n={num_simulations},d={rollout_depth})")
+        self.num_simulations = num_simulations
+        self.rollout_depth = rollout_depth
+        self.exploration = exploration
+        self.num_workers = num_workers
+        self._min_val = float('inf')
+        self._max_val = float('-inf')
+
+    def _select(self, node):
+        while not node.is_terminal and node.is_fully_expanded:
+            node = node.best_child(self.exploration, self._min_val, self._max_val)
+        return node
+
+    def _rollout(self, game):
+        """Random rollout, return game score."""
+        sim = game.clone()
+        for _ in range(self.rollout_depth):
+            if sim.is_game_over():
+                break
+            moves = sim.get_available_moves()
+            if not moves:
+                break
+            sim.move_fast(moves[np.random.randint(len(moves))])
+        return _tree_value(sim)
+
+    def _backpropagate(self, node, value):
+        if value < self._min_val:
+            self._min_val = value
+        if value > self._max_val:
+            self._max_val = value
+        while node is not None:
+            node.visits += 1
+            node.value += value
+            node = node.parent
+
+    def choose_action(self, state, available_moves, game_context=None):
+        if len(available_moves) == 1:
+            return available_moves[0]
+
+        game = game_context['game'] if game_context and 'game' in game_context else None
+        if game is None:
+            game = Game2048.from_state(state)
+
+        root = MCTSNode(game.clone())
+        self._min_val = float('inf')
+        self._max_val = float('-inf')
+
+        if self.num_workers <= 1:
+            for _ in range(self.num_simulations):
+                node = self._select(root)
+                if not node.is_terminal and not node.is_fully_expanded:
+                    node = node.expand()
+                value = self._rollout(node.game)
+                self._backpropagate(node, value)
+        else:
+            self._run_parallel(root, game)
+
+        if not root.children:
+            return available_moves[0]
+
+        return max(root.children.values(), key=lambda c: c.visits).action
+
+    def _run_parallel(self, root, game):
+        tile_2_prob = game.tile_2_prob
+        sims_done = 0
+        batch_size = self.num_workers * 2
+
+        with ProcessPoolExecutor(max_workers=self.num_workers) as pool:
+            while sims_done < self.num_simulations:
+                batch_nodes = []
+                current_batch = min(batch_size, self.num_simulations - sims_done)
+
+                for _ in range(current_batch):
+                    node = self._select(root)
+                    if not node.is_terminal and not node.is_fully_expanded:
+                        node = node.expand()
+                    batch_nodes.append(node)
+
+                futures = {}
+                for i, node in enumerate(batch_nodes):
+                    f = pool.submit(
+                        _worker_random_rollout,
+                        node.game.get_state(), node.game.get_score(),
+                        self.rollout_depth, tile_2_prob,
+                    )
+                    futures[f] = i
+
+                results = [None] * len(batch_nodes)
+                for f in as_completed(futures):
+                    results[futures[f]] = f.result()
+
+                for node, value in zip(batch_nodes, results):
+                    self._backpropagate(node, value)
+
+                sims_done += current_batch
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  HEURISTIC MCTS — heuristic guides rollout, score drives tree
+# ═══════════════════════════════════════════════════════════════════
+
+class MCTSHeuristicAgent(BaseAgent):
+    """Optimized MCTS: heuristic-guided rollouts, game-score tree values.
+
+    The heuristic picks which move to play at each rollout step
+    (greedy move selection). But the value backpropagated through
+    the MCTS tree is the raw game score — giving UCB1 large,
+    well-separated values to distinguish good from bad branches.
+
+    This matches the approach from thomasahle/mcts-2048 (greedy
+    rollout policy + SumMeasure for evaluation) and chadpalmer2
+    (game score for evaluation).
+
+    When rollout_depth=0, the leaf node's game score is used
+    directly (no rollout).
+
+    Args:
+        num_simulations: MCTS iterations per move decision.
+        rollout_depth:   Greedy rollout steps. 0 = direct score eval.
+        exploration:     UCB1 exploration constant.
+        num_workers:     Parallel rollout workers. 1 = sequential.
+        eval_fn:         Optional heuristic for rollout move selection.
+        reward_fn:       Optional RewardFunction for rollout move selection.
+
+    Example::
+
+        # Greedy rollout, sequential
+        agent = MCTSHeuristicAgent(num_simulations=500, rollout_depth=10)
+
+        # Direct score eval, parallel
+        agent = MCTSHeuristicAgent(
+            num_simulations=1000, rollout_depth=0, num_workers=4,
+        )
+    """
+
+    agent_type = "mcts_heuristic"
+
+    def __init__(
+        self,
+        num_simulations: int = 200,
+        rollout_depth: int = 10,
+        exploration: float = math.sqrt(2),
+        num_workers: int = 1,
+        eval_fn=None,
+        reward_fn=None,
+    ):
+        depth_label = f"d={rollout_depth}" if rollout_depth > 0 else "direct"
+        workers_label = f",w={num_workers}" if num_workers > 1 else ""
+        super().__init__(
+            f"MCTS-H(n={num_simulations},{depth_label}{workers_label})"
+        )
+        self.num_simulations = num_simulations
+        self.rollout_depth = rollout_depth
+        self.exploration = exploration
+        self.num_workers = num_workers
+        self._min_val = float('inf')
+        self._max_val = float('-inf')
+        # Heuristic is ONLY for rollout move selection
+        if eval_fn is None and reward_fn is None and RewardFunction is not None:
+            reward_fn = RewardFunction(weights={
+                'tile': 1.0, 'empty': 0.5, 'mono': 1.5,
+                'corner': 0, 'merge': 0.5, 'smooth': 0.1,
+            })
+        self.rollout_policy = _resolve_rollout_policy(eval_fn, reward_fn)
+
+    def _select(self, node):
+        while not node.is_terminal and node.is_fully_expanded:
+            node = node.best_child(self.exploration, self._min_val, self._max_val)
+        return node
+
+    def _rollout(self, game):
+        """Greedy heuristic rollout, return game score."""
+        if self.rollout_depth == 0:
+            return _tree_value(game)
+
+        sim = game.clone()
+        for _ in range(self.rollout_depth):
+            if sim.is_game_over():
+                break
+            moves = sim.get_available_moves()
+            if not moves:
+                break
+
+            # Heuristic picks the move — read board directly, skip copy
+            best_h = -float('inf')
+            best_move = moves[0]
+            for move in moves:
+                child = sim.clone()
+                child.move_fast(move)
+                h = self.rollout_policy(child.board)
+                if h > best_h:
+                    best_h = h
+                    best_move = move
+
+            sim.move_fast(best_move)
+
+        # Game score drives the tree
+        return _tree_value(sim)
+
+    def _backpropagate(self, node, value):
+        if value < self._min_val:
+            self._min_val = value
+        if value > self._max_val:
+            self._max_val = value
+        while node is not None:
+            node.visits += 1
+            node.value += value
+            node = node.parent
+
+    def choose_action(self, state, available_moves, game_context=None):
+        if len(available_moves) == 1:
+            return available_moves[0]
+
+        game = game_context['game'] if game_context and 'game' in game_context else None
+        if game is None:
+            game = Game2048.from_state(state)
+
+        root = MCTSNode(game.clone())
+        self._min_val = float('inf')
+        self._max_val = float('-inf')
+
+        if self.num_workers <= 1:
+            for _ in range(self.num_simulations):
+                node = self._select(root)
+                if not node.is_terminal and not node.is_fully_expanded:
+                    node = node.expand()
+                value = self._rollout(node.game)
+                self._backpropagate(node, value)
+        else:
+            self._run_parallel(root, game)
+
+        if not root.children:
+            return available_moves[0]
+
+        return max(root.children.values(), key=lambda c: c.visits).action
+
+    def _run_parallel(self, root, game):
+        tile_2_prob = game.tile_2_prob
+        sims_done = 0
+        batch_size = self.num_workers * 2
+
+        with ProcessPoolExecutor(max_workers=self.num_workers) as pool:
+            while sims_done < self.num_simulations:
+                batch_nodes = []
+                current_batch = min(batch_size, self.num_simulations - sims_done)
+
+                for _ in range(current_batch):
+                    node = self._select(root)
+                    if not node.is_terminal and not node.is_fully_expanded:
+                        node = node.expand()
+                    batch_nodes.append(node)
+
+                futures = {}
+                for i, node in enumerate(batch_nodes):
+                    f = pool.submit(
+                        _worker_greedy_rollout,
+                        node.game.get_state(), node.game.get_score(),
+                        self.rollout_depth, tile_2_prob,
+                    )
+                    futures[f] = i
+
+                results = [None] * len(batch_nodes)
+                for f in as_completed(futures):
+                    results[futures[f]] = f.result()
+
+                for node, value in zip(batch_nodes, results):
+                    self._backpropagate(node, value)
+
+                sims_done += current_batch
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    from framework.interaction import InteractionModule
+    from framework.logger import RunLogger
+
+    config = {"grid_size": 4}
+    logger = RunLogger()
+
+    # ── Run classic MCTS ──────────────────────────────────────
+    print("=" * 60)
+    print("  CLASSIC MCTS (random rollouts)")
+    print("=" * 60)
+    agent_classic = MCTSAgent(num_simulations=300, rollout_depth=15)
+    module = InteractionModule(
+        config=config, agent=agent_classic,
+        logger=logger, verbose=True, print_board=True, num_workers=10
+    )
+    module.run(num_games=100)
+    module.print_results()

@@ -32,7 +32,8 @@ Typical human usage::
     python game_2048.py              # reads config.json
     python game_2048.py --agent      # random agent demo
 """
-
+import os
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 import pygame
 import numpy as np
 import json
@@ -53,6 +54,13 @@ class Action(Enum):
     DOWN = 1
     LEFT = 2
     RIGHT = 3
+
+
+# Precompute for fast access in hot loops
+_ACTION_LEFT = Action.LEFT
+_ACTION_RIGHT = Action.RIGHT
+_ACTION_UP = Action.UP
+_ACTION_DOWN = Action.DOWN
 
 
 class Game2048:
@@ -89,6 +97,9 @@ class Game2048:
         valid, reward = game.move(Action.LEFT)
     """
 
+    __slots__ = ('grid_size', 'tile_2_prob', 'initial_tiles', 'seed',
+                 'board', 'score', 'game_over')
+
     def __init__(self, config: Dict):
         self.grid_size = config.get('grid_size', 4)
         self.tile_2_prob = config.get('tile_2_probability', 0.9)
@@ -98,7 +109,7 @@ class Game2048:
         if self.seed is not None:
             np.random.seed(self.seed)
 
-        self.board = np.zeros((self.grid_size, self.grid_size), dtype=int)
+        self.board = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
         self.score = 0
         self.game_over = False
 
@@ -140,12 +151,16 @@ class Game2048:
             game = Game2048.from_state(board, score=100)
             game.move(Action.LEFT)
         """
-        config = config or {}
         obj = cls.__new__(cls)
-        obj.grid_size = config.get('grid_size', board.shape[0])
-        obj.tile_2_prob = config.get('tile_2_probability', 0.9)
-        obj.initial_tiles = config.get('initial_tiles', 2)
-        obj.seed = None  # simulations use independent RNG
+        if config:
+            obj.grid_size = config.get('grid_size', board.shape[0])
+            obj.tile_2_prob = config.get('tile_2_probability', 0.9)
+            obj.initial_tiles = config.get('initial_tiles', 2)
+        else:
+            obj.grid_size = board.shape[0]
+            obj.tile_2_prob = 0.9
+            obj.initial_tiles = 2
+        obj.seed = None
         obj.board = board.copy()
         obj.score = score
         obj.game_over = False
@@ -154,30 +169,23 @@ class Game2048:
     def clone(self) -> 'Game2048':
         """Create an independent copy of this game for simulation.
 
-        The clone shares no mutable state with the original — modifying
-        the clone (calling ``move()``, etc.) has zero side effects on
-        the source instance. The clone's RNG is independent.
-
-        This is the primary method search agents should use::
-
-            for action in game.get_available_moves():
-                sim = game.clone()
-                sim.move(action)
-                value = evaluate(sim)
+        Optimized: directly sets attributes without going through
+        from_state's config dict parsing. The clone shares no mutable
+        state with the original.
 
         Returns:
             Game2048: A deep copy with identical board, score, and config
                 but independent state.
         """
-        return Game2048.from_state(
-            board=self.board,
-            score=self.score,
-            config={
-                'grid_size': self.grid_size,
-                'tile_2_probability': self.tile_2_prob,
-                'initial_tiles': self.initial_tiles,
-            },
-        )
+        obj = Game2048.__new__(Game2048)
+        obj.grid_size = self.grid_size
+        obj.tile_2_prob = self.tile_2_prob
+        obj.initial_tiles = self.initial_tiles
+        obj.seed = None
+        obj.board = self.board.copy()
+        obj.score = self.score
+        obj.game_over = self.game_over
+        return obj
 
     # ─── Core game logic ──────────────────────────────────────────
 
@@ -191,8 +199,8 @@ class Game2048:
         Returns:
             bool: True if a tile was placed, False if the board is full.
         """
-        empty = list(zip(*np.where(self.board == 0)))
-        if not empty:
+        empty = np.argwhere(self.board == 0)
+        if len(empty) == 0:
             return False
         r, c = empty[np.random.randint(len(empty))]
         self.board[r, c] = 2 if np.random.random() < self.tile_2_prob else 4
@@ -226,37 +234,103 @@ class Game2048:
         """
         if self.game_over:
             return True
-        if np.any(self.board == 0):
+        b = self.board
+        if np.any(b == 0):
             return False
-        for r in range(self.grid_size):
-            for c in range(self.grid_size):
-                val = self.board[r, c]
-                if c + 1 < self.grid_size and val == self.board[r, c + 1]:
-                    return False
-                if r + 1 < self.grid_size and val == self.board[r + 1, c]:
-                    return False
+        # Check horizontal merges
+        if np.any(b[:, :-1] == b[:, 1:]):
+            return False
+        # Check vertical merges
+        if np.any(b[:-1, :] == b[1:, :]):
+            return False
         self.game_over = True
         return True
 
     def get_available_moves(self) -> List[Action]:
         """Return a list of actions that would change the board state.
 
-        Each candidate action is simulated on a copy of the board. Only
-        actions that produce a different board configuration are included.
+        Uses lightweight numpy checks instead of Python loops.
 
         Returns:
-            List[Action]: Valid actions from the current state. May be empty
-                if the game is over.
+            List[Action]: Valid actions from the current state.
         """
         moves = []
-        for action in Action:
-            board_copy = self.board.copy()
-            score_copy = self.score
-            changed, _ = self._execute_move(action)
-            if changed:
-                moves.append(action)
-            self.board = board_copy
-            self.score = score_copy
+        b = self.board
+        n = self.grid_size
+
+        # LEFT: for each row, check if any tile can slide left into
+        # an empty cell, or merge with the tile to its left
+        can_left = False
+        for r in range(n):
+            found_empty = False
+            for c in range(n):
+                if b[r, c] == 0:
+                    found_empty = True
+                elif found_empty:
+                    can_left = True
+                    break
+                elif c > 0 and b[r, c] == b[r, c - 1] and b[r, c] != 0:
+                    can_left = True
+                    break
+            if can_left:
+                break
+        if can_left:
+            moves.append(_ACTION_LEFT)
+
+        # RIGHT: mirror of LEFT — scan each row right to left
+        can_right = False
+        for r in range(n):
+            found_empty = False
+            for c in range(n - 1, -1, -1):
+                if b[r, c] == 0:
+                    found_empty = True
+                elif found_empty:
+                    can_right = True
+                    break
+                elif c < n - 1 and b[r, c] == b[r, c + 1] and b[r, c] != 0:
+                    can_right = True
+                    break
+            if can_right:
+                break
+        if can_right:
+            moves.append(_ACTION_RIGHT)
+
+        # UP: for each column, check if any tile can slide up
+        can_up = False
+        for c in range(n):
+            found_empty = False
+            for r in range(n):
+                if b[r, c] == 0:
+                    found_empty = True
+                elif found_empty:
+                    can_up = True
+                    break
+                elif r > 0 and b[r, c] == b[r - 1, c] and b[r, c] != 0:
+                    can_up = True
+                    break
+            if can_up:
+                break
+        if can_up:
+            moves.append(_ACTION_UP)
+
+        # DOWN: mirror of UP — scan each column bottom to top
+        can_down = False
+        for c in range(n):
+            found_empty = False
+            for r in range(n - 1, -1, -1):
+                if b[r, c] == 0:
+                    found_empty = True
+                elif found_empty:
+                    can_down = True
+                    break
+                elif r < n - 1 and b[r, c] == b[r + 1, c] and b[r, c] != 0:
+                    can_down = True
+                    break
+            if can_down:
+                break
+        if can_down:
+            moves.append(_ACTION_DOWN)
+
         return moves
 
     def calculate_reward(self, old_board: np.ndarray, new_board: np.ndarray,
@@ -286,7 +360,8 @@ class Game2048:
         """
         return sum(val for _, _, val in merges)
 
-    def _slide_and_merge_line(self, line: np.ndarray) -> Tuple[np.ndarray, int, List[Tuple[int, int, int]]]:
+    @staticmethod
+    def _slide_and_merge_line(line: np.ndarray) -> Tuple[np.ndarray, int, List[Tuple[int, int, int]]]:
         """Slide a single row or column toward index 0, merging equal adjacent tiles.
 
         This is the core merge algorithm. It processes one 1D slice of the board:
@@ -310,28 +385,68 @@ class Game2048:
             # [2, 2, 4, 4] -> [4, 8, 0, 0], points=12, merges=[(2,2,4),(4,4,8)]
         """
         non_zero = line[line != 0]
-        merged = []
-        merge_list = []
-        points = 0
-        skip = False
-
-        for i in range(len(non_zero)):
-            if skip:
-                skip = False
-                continue
-            if i + 1 < len(non_zero) and non_zero[i] == non_zero[i + 1]:
-                val = non_zero[i] * 2
-                merged.append(val)
-                merge_list.append((int(non_zero[i]), int(non_zero[i + 1]), int(val)))
-                points += val
-                skip = True
-            else:
-                merged.append(non_zero[i])
+        size = len(non_zero)
+        if size == 0:
+            return line.copy(), 0, []
 
         result = np.zeros_like(line)
-        for i, v in enumerate(merged):
-            result[i] = v
+        merge_list = []
+        points = 0
+        write = 0
+        i = 0
+
+        while i < size:
+            if i + 1 < size and non_zero[i] == non_zero[i + 1]:
+                val = int(non_zero[i]) * 2
+                result[write] = val
+                merge_list.append((int(non_zero[i]), int(non_zero[i]), val))
+                points += val
+                i += 2
+            else:
+                result[write] = non_zero[i]
+                i += 1
+            write += 1
+
         return result, points, merge_list
+
+    @staticmethod
+    def _slide_and_merge_line_fast(line: np.ndarray) -> Tuple[np.ndarray, int]:
+        """Fast slide-and-merge for simulation — skips merge event tracking.
+
+        Same logic as _slide_and_merge_line but only returns the result
+        and points, avoiding list allocation and tuple construction for
+        merge events. Used by move_fast() during MCTS/search rollouts.
+
+        Args:
+            line (np.ndarray): 1D array representing a single row or column.
+
+        Returns:
+            Tuple containing:
+                - np.ndarray: The resulting line after slide and merge.
+                - int: Points scored from merges in this line.
+        """
+        non_zero = line[line != 0]
+        size = len(non_zero)
+        if size == 0:
+            return line, 0
+
+        result = np.zeros_like(line)
+        points = 0
+        write = 0
+        i = 0
+
+        while i < size:
+            if i + 1 < size and non_zero[i] == non_zero[i + 1]:
+                val = int(non_zero[i]) * 2
+                result[write] = val
+                points += val
+                i += 2
+            else:
+                result[write] = non_zero[i]
+                i += 1
+            write += 1
+
+        return result, points
 
     def _execute_move(self, action: Action) -> Tuple[bool, List[Tuple[int, int, int]]]:
         """Execute a move on the board in-place.
@@ -352,27 +467,27 @@ class Game2048:
         total_points = 0
         all_merges = []
 
-        if action == Action.LEFT:
+        if action == _ACTION_LEFT:
             for r in range(self.grid_size):
                 self.board[r], pts, merges = self._slide_and_merge_line(self.board[r])
                 total_points += pts
                 all_merges.extend(merges)
 
-        elif action == Action.RIGHT:
+        elif action == _ACTION_RIGHT:
             for r in range(self.grid_size):
                 self.board[r], pts, merges = self._slide_and_merge_line(self.board[r][::-1])
                 self.board[r] = self.board[r][::-1]
                 total_points += pts
                 all_merges.extend(merges)
 
-        elif action == Action.UP:
+        elif action == _ACTION_UP:
             for c in range(self.grid_size):
                 col = self.board[:, c]
                 self.board[:, c], pts, merges = self._slide_and_merge_line(col)
                 total_points += pts
                 all_merges.extend(merges)
 
-        elif action == Action.DOWN:
+        elif action == _ACTION_DOWN:
             for c in range(self.grid_size):
                 col = self.board[:, c][::-1]
                 merged, pts, merges = self._slide_and_merge_line(col)
@@ -384,6 +499,50 @@ class Game2048:
         if changed:
             self.score += total_points
         return changed, all_merges
+
+    def _execute_move_fast(self, action: Action) -> bool:
+        """Execute a move in-place — fast path for simulations.
+
+        Skips merge event tracking and uses hash-based change detection
+        instead of storing a full board copy. Used by move_fast().
+
+        Args:
+            action (Action): The direction to slide tiles.
+
+        Returns:
+            bool: True if the board changed (move was valid).
+        """
+        board_hash = self.board.data.tobytes()
+        total_points = 0
+        n = self.grid_size
+
+        if action == _ACTION_LEFT:
+            for r in range(n):
+                self.board[r], pts = self._slide_and_merge_line_fast(self.board[r])
+                total_points += pts
+
+        elif action == _ACTION_RIGHT:
+            for r in range(n):
+                self.board[r], pts = self._slide_and_merge_line_fast(self.board[r][::-1])
+                self.board[r] = self.board[r][::-1]
+                total_points += pts
+
+        elif action == _ACTION_UP:
+            for c in range(n):
+                self.board[:, c], pts = self._slide_and_merge_line_fast(self.board[:, c])
+                total_points += pts
+
+        elif action == _ACTION_DOWN:
+            for c in range(n):
+                col_rev = self.board[:, c][::-1]
+                merged, pts = self._slide_and_merge_line_fast(col_rev)
+                self.board[:, c] = merged[::-1]
+                total_points += pts
+
+        changed = self.board.data.tobytes() != board_hash
+        if changed:
+            self.score += total_points
+        return changed
 
     def move(self, action: Action) -> Tuple[bool, int]:
         """Execute a move and spawn a new tile if valid.
@@ -416,6 +575,31 @@ class Game2048:
         self.is_game_over()
         return True, reward
 
+    def move_fast(self, action: Action) -> bool:
+        """Execute a move — fast path for MCTS / search simulations.
+
+        Skips reward calculation, merge event tracking, and old_board
+        copy. Only returns whether the move was valid. Use this in
+        rollouts and tree expansion where you only need the resulting
+        board state and score.
+
+        Args:
+            action (Action): The direction to slide tiles.
+
+        Returns:
+            bool: True if the move was valid (board changed).
+        """
+        if self.game_over:
+            return False
+
+        changed = self._execute_move_fast(action)
+        if not changed:
+            return False
+
+        self._add_random_tile()
+        self.is_game_over()
+        return True
+
     def reset(self):
         """Reset the game to a fresh initial state.
 
@@ -423,7 +607,7 @@ class Game2048:
         new random tiles. Does NOT reset the random seed, so subsequent
         games will continue from the current RNG state.
         """
-        self.board = np.zeros((self.grid_size, self.grid_size), dtype=int)
+        self.board = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
         self.score = 0
         self.game_over = False
         for _ in range(self.initial_tiles):
