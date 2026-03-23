@@ -27,7 +27,7 @@ from multiprocessing import Pool, cpu_count
 
 from game import Game2048, Action
 from agents.beam_search import BeamSearchAgent
-from agents.evaluation import RewardFunction
+from framework.evaluation import RewardFunction
 
 
 # ═══════════════════════════════════════════════════════════════════

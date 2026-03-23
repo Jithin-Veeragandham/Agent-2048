@@ -6,7 +6,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from game import Game2048, Action
 from agents.base import BaseAgent
-from agents.evaluation import GameEvaluator, RewardFunction, REWARD_SEARCH
+from framework.evaluation import GameEvaluator, RewardFunction, REWARD_SEARCH
 
 # Re-export BaseAgent so old code using `from interaction import BaseAgent` still works
 __all__ = ['InteractionModule', 'run_comparison', 'BaseAgent']
@@ -500,7 +500,7 @@ def run_comparison(
             num_workers=8,
         )
     """
-    from agents.evaluation import compare_agents
+    from framework.evaluation import compare_agents
 
     all_results = []
 

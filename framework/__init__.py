@@ -1,1 +1,2 @@
 from framework.interaction import InteractionModule, run_comparison as run_agents
+from framework.evaluation import RewardFunction, GameEvaluator

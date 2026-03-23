@@ -37,7 +37,7 @@ from game import Game2048, Action
 # Try importing from the project's evaluation module; fall back to
 # a self-contained heuristic if agents.evaluation isn't available.
 try:
-    from agents.evaluation import RewardFunction
+    from framework.evaluation import RewardFunction
 except ImportError:
     RewardFunction = None
 

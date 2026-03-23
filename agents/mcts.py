@@ -44,7 +44,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from game import Game2048, Action
 
 try:
-    from agents.evaluation import RewardFunction
+    from framework.evaluation import RewardFunction
 except ImportError:
     RewardFunction = None
 
