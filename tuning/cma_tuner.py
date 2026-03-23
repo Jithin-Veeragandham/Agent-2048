@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from multiprocessing import Pool, cpu_count
 
 from game import Game2048, Action
-from heuristic_beam_search import BeamSearchAgent
-from evaluation import RewardFunction
+from agents.beam_search import BeamSearchAgent
+from agents.evaluation import RewardFunction
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -19,9 +19,9 @@ board states.
 
 Usage::
 
-    from mcts import MCTSAgent, MCTSHeuristicAgent
-    from interaction import InteractionModule
-    from utils import RunLogger
+    from agents.mcts import MCTSAgent, MCTSHeuristicAgent
+    from framework.interaction import InteractionModule
+    from framework.logger import RunLogger
 
     agent = MCTSHeuristicAgent(num_simulations=500, rollout_depth=10)
 
@@ -44,26 +44,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from game import Game2048, Action
 
 try:
-    from evaluation import RewardFunction
+    from agents.evaluation import RewardFunction
 except ImportError:
     RewardFunction = None
 
-try:
-    from interaction import BaseAgent
-except ImportError:
-    from abc import ABC, abstractmethod
-
-    class BaseAgent(ABC):
-        def __init__(self, name: str):
-            self.name = name
-
-        @abstractmethod
-        def choose_action(self, state, available_moves, game_context=None):
-            ...
-
-        def on_episode_start(self): pass
-        def on_episode_end(self, final_state, score): pass
-        def on_move_result(self, state, action, reward, next_state, done): pass
+from agents.base import BaseAgent
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -207,7 +192,7 @@ def _worker_random_rollout(board, score, rollout_depth, tile_2_prob):
 
 
 def _worker_greedy_rollout(board, score, rollout_depth, tile_2_prob):
-    """Greedy heuristic rollout worker. Returns game score + tile sum."""
+    """Greedy heuristic rollout worker. Returns game score."""
     sim = Game2048.from_state(board, score=score, config={
         'tile_2_probability': tile_2_prob,
     })
@@ -230,7 +215,7 @@ def _worker_greedy_rollout(board, score, rollout_depth, tile_2_prob):
 
         sim.move_fast(best_move)
 
-    return sim.get_score() + float(np.sum(sim.get_state()))
+    return float(sim.get_score())
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -261,15 +246,16 @@ class MCTSNode:
     def is_terminal(self):
         return self._terminal
 
-    def ucb1(self, c):
-        if self.visits == 0:
+    def ucb1(self, c, min_val=0.0, max_val=1.0):
+        if self.visits == 0 or self.parent is None:
             return float('inf')
-        return (self.value / self.visits) + c * math.sqrt(
-            math.log(self.parent.visits) / self.visits
-        )
+        avg = self.value / self.visits
+        if max_val > min_val:
+            avg = (avg - min_val) / (max_val - min_val)
+        return avg + c * math.sqrt(math.log(self.parent.visits) / self.visits)
 
-    def best_child(self, c):
-        return max(self.children.values(), key=lambda ch: ch.ucb1(c))
+    def best_child(self, c, min_val=0.0, max_val=1.0):
+        return max(self.children.values(), key=lambda ch: ch.ucb1(c, min_val, max_val))
 
     def expand(self):
         action = self.untried.pop()
@@ -300,6 +286,8 @@ class MCTSAgent(BaseAgent):
         agent = MCTSAgent(num_simulations=500, rollout_depth=20)
     """
 
+    agent_type = "mcts"
+
     def __init__(
         self,
         num_simulations: int = 200,
@@ -312,10 +300,12 @@ class MCTSAgent(BaseAgent):
         self.rollout_depth = rollout_depth
         self.exploration = exploration
         self.num_workers = num_workers
+        self._min_val = float('inf')
+        self._max_val = float('-inf')
 
     def _select(self, node):
         while not node.is_terminal and node.is_fully_expanded:
-            node = node.best_child(self.exploration)
+            node = node.best_child(self.exploration, self._min_val, self._max_val)
         return node
 
     def _rollout(self, game):
@@ -331,6 +321,10 @@ class MCTSAgent(BaseAgent):
         return _tree_value(sim)
 
     def _backpropagate(self, node, value):
+        if value < self._min_val:
+            self._min_val = value
+        if value > self._max_val:
+            self._max_val = value
         while node is not None:
             node.visits += 1
             node.value += value
@@ -345,6 +339,8 @@ class MCTSAgent(BaseAgent):
             game = Game2048.from_state(state)
 
         root = MCTSNode(game.clone())
+        self._min_val = float('inf')
+        self._max_val = float('-inf')
 
         if self.num_workers <= 1:
             for _ in range(self.num_simulations):
@@ -434,6 +430,8 @@ class MCTSHeuristicAgent(BaseAgent):
         )
     """
 
+    agent_type = "mcts_heuristic"
+
     def __init__(
         self,
         num_simulations: int = 200,
@@ -452,12 +450,19 @@ class MCTSHeuristicAgent(BaseAgent):
         self.rollout_depth = rollout_depth
         self.exploration = exploration
         self.num_workers = num_workers
+        self._min_val = float('inf')
+        self._max_val = float('-inf')
         # Heuristic is ONLY for rollout move selection
+        if eval_fn is None and reward_fn is None and RewardFunction is not None:
+            reward_fn = RewardFunction(weights={
+                'tile': 1.0, 'empty': 0.5, 'mono': 1.5,
+                'corner': 0, 'merge': 0.5, 'smooth': 0.1,
+            })
         self.rollout_policy = _resolve_rollout_policy(eval_fn, reward_fn)
 
     def _select(self, node):
         while not node.is_terminal and node.is_fully_expanded:
-            node = node.best_child(self.exploration)
+            node = node.best_child(self.exploration, self._min_val, self._max_val)
         return node
 
     def _rollout(self, game):
@@ -490,6 +495,10 @@ class MCTSHeuristicAgent(BaseAgent):
         return _tree_value(sim)
 
     def _backpropagate(self, node, value):
+        if value < self._min_val:
+            self._min_val = value
+        if value > self._max_val:
+            self._max_val = value
         while node is not None:
             node.visits += 1
             node.value += value
@@ -504,6 +513,8 @@ class MCTSHeuristicAgent(BaseAgent):
             game = Game2048.from_state(state)
 
         root = MCTSNode(game.clone())
+        self._min_val = float('inf')
+        self._max_val = float('-inf')
 
         if self.num_workers <= 1:
             for _ in range(self.num_simulations):
@@ -560,36 +571,20 @@ class MCTSHeuristicAgent(BaseAgent):
 # ═══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    from interaction import InteractionModule
-    from utils import RunLogger
+    from framework.interaction import InteractionModule
+    from framework.logger import RunLogger
 
     config = {"grid_size": 4}
     logger = RunLogger()
 
     # ── Run classic MCTS ──────────────────────────────────────
-    # print("=" * 60)
-    # print("  CLASSIC MCTS (random rollouts)")
-    # print("=" * 60)
-    # agent_classic = MCTSAgent(num_simulations=500, rollout_depth=20)
-    # module = InteractionModule(
-    #     config=config, agent=agent_classic,
-    #     logger=logger, verbose=True, print_board=True,
-    # )
-    # module.run(num_games=1)
-    # module.print_results()
-
-    # ── Run heuristic MCTS ────────────────────────────────────
     print("=" * 60)
-    print("  HEURISTIC MCTS (greedy rollouts, game score tree value)")
+    print("  CLASSIC MCTS (random rollouts)")
     print("=" * 60)
-    agent_heuristic = MCTSHeuristicAgent(
-        num_simulations=300,
-        rollout_depth=15,
-        exploration=100.0,
+    agent_classic = MCTSAgent(num_simulations=300, rollout_depth=15)
+    module = InteractionModule(
+        config=config, agent=agent_classic,
+        logger=logger, verbose=True, print_board=True, num_workers=10
     )
-    module2 = InteractionModule(
-        config=config, agent=agent_heuristic,
-        logger=logger, verbose=True, print_board=True,
-    )
-    module2.run(num_games=10)
-    module2.print_results()
+    module.run(num_games=100)
+    module.print_results()

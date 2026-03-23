@@ -1,2 +1,6 @@
 pygame
 numpy
+scipy
+matplotlib
+cma
+tqdm

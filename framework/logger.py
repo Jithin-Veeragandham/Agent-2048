@@ -1,5 +1,5 @@
 """
-utils.py
+logger.py
 ========
 
 Logging utilities for 2048 agent experiments.
@@ -50,9 +50,9 @@ This lets you:
 
 Usage::
 
-    from utils import RunLogger
-    from interaction import InteractionModule
-    from beam_search import BeamSearchAgent
+    from framework.logger import RunLogger
+    from framework.interaction import InteractionModule
+    from agents.beam_search import BeamSearchAgent
 
     agent = BeamSearchAgent(beam_width=10, search_depth=15)
     logger = RunLogger()
@@ -69,7 +69,7 @@ Usage::
 
 Reading logs back::
 
-    from utils import load_all_runs, load_latest_run
+    from framework.logger import load_all_runs, load_latest_run
 
     # All historical games (every agent, every config)
     all_games = load_all_runs()

@@ -10,9 +10,9 @@ scored by a composite heuristic evaluation function.
 
 Usage (Jupyter notebook)::
 
-    from beam_search import BeamSearchAgent
-    from interaction import InteractionModule
-    from utils import RunLogger
+    from agents.beam_search import BeamSearchAgent
+    from framework.interaction import InteractionModule
+    from framework.logger import RunLogger
 
     agent = BeamSearchAgent(beam_width=10, search_depth=10)
     logger = RunLogger()
@@ -35,29 +35,13 @@ from typing import Dict, List, Optional, Tuple, Any
 from game import Game2048, Action
 
 # Try importing from the project's evaluation module; fall back to
-# a self-contained heuristic if evaluation.py isn't available.
+# a self-contained heuristic if agents.evaluation isn't available.
 try:
-    from evaluation import RewardFunction
+    from agents.evaluation import RewardFunction
 except ImportError:
     RewardFunction = None
 
-try:
-    from interaction import BaseAgent
-except ImportError:
-    # Minimal stub so the file works standalone
-    from abc import ABC, abstractmethod
-
-    class BaseAgent(ABC):
-        def __init__(self, name: str):
-            self.name = name
-
-        @abstractmethod
-        def choose_action(self, state, available_moves, game_context=None):
-            ...
-
-        def on_episode_start(self): pass
-        def on_episode_end(self, final_state, score): pass
-        def on_move_result(self, state, action, reward, next_state, done): pass
+from agents.base import BaseAgent
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -288,12 +272,12 @@ class BeamSearchAgent(BaseAgent):
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  MAIN — run directly: python beam_search.py
+#  MAIN — run directly: python -m agents.beam_search
 # ═══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    from interaction import InteractionModule
-    from utils import RunLogger
+    from framework.interaction import InteractionModule
+    from framework.logger import RunLogger
 
     config = {"grid_size": 4}
     game_agent = BeamSearchAgent(
@@ -309,6 +293,7 @@ if __name__ == "__main__":
         logger=logger,
         verbose=True,
         print_board=True,
+        num_workers=10
     )
-    module.run(num_games=10)
+    module.run(num_games=100)
     module.print_results()
