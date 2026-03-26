@@ -31,8 +31,9 @@ Usage (Jupyter notebook)::
 import time
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Any
-
-from game import Game2048, Action
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from game.engine import Game2048, Action
 
 # Try importing from the project's evaluation module; fall back to
 # a self-contained heuristic if agents.evaluation isn't available.
