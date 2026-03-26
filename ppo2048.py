@@ -258,6 +258,7 @@ SHAPING_WEIGHTS = {
         'tile':   1.0,
         'empty':  0.5,
         'mono':   2.5,
+        'corner': 1.5,
         'merge':  0.5,
         'smooth': 0.1,
 }
@@ -401,6 +402,30 @@ def _monotonicity_batch(boards: torch.Tensor) -> torch.Tensor:
  
     return h_mono + v_mono   
 
+def _corner_bonus_batch(boards: torch.Tensor) -> torch.Tensor:
+    """Batched corner bonus: penalizes max tile not being in a corner.
+ 
+    Matches evaluation.py's RewardFunction.corner_bonus() but batched.
+    Returns 0 when the max tile IS in the top-left corner, and a
+    negative penalty proportional to (max_val - corner_val) otherwise.
+ 
+    Args:
+        boards: (N, grid, grid) int tensor
+ 
+    Returns:
+        (N,) float tensor — 0 (best) or negative penalty
+    """
+    flat = boards.reshape(boards.shape[0], -1).float()          # (N, G*G)
+    max_val = flat.max(dim=1).values                            # (N,)
+    corner_val = boards[:, 0, 0].float()                        # (N,)
+    # Penalty: -(max_val - corner_val) when max tile not in corner
+    penalty = torch.where(
+        corner_val >= max_val,
+        torch.zeros_like(max_val),
+        -(max_val - corner_val),
+    )
+    return penalty  
+
 def _heuristic_value(boards: torch.Tensor,
                      weights: dict = SHAPING_WEIGHTS) -> torch.Tensor:
     """Compute composite heuristic value for a batch of boards.
@@ -421,6 +446,7 @@ def _heuristic_value(boards: torch.Tensor,
     t = _tile_score_batch(boards)
     e = _empty_bonus_batch(boards)
     mo = _monotonicity_batch(boards)
+    co = _corner_bonus_batch(boards)
     m = _merge_potential_batch(boards)
     s = _smoothness_batch(boards)
 
@@ -428,12 +454,14 @@ def _heuristic_value(boards: torch.Tensor,
     t_norm = t / (2048.0 * 11.0 * max_cells + 1e-8)
     e_norm = e / (max_cells ** 2 + max_cells * 2.0 + 1e-8)
     mo_norm = mo / (11.0 * max_cells + 1e-8)
+    co_norm = co / (2048.0 + 1e-8)
     m_norm = m / (11.0 * max_cells + 1e-8)
     s_norm = s / (11.0 * max_cells * 2.0 + 1e-8)
 
     return (weights['tile'] * t_norm
             + weights['empty'] * e_norm
             + weights['mono'] * mo_norm
+            + weights['corner'] * co_norm
             + weights['merge'] * m_norm
             - weights['smooth'] * s_norm)
 
