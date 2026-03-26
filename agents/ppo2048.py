@@ -14,10 +14,14 @@ from torch.distributions import Categorical
 # Enable CuDNN autotuner and TF32
 torch.backends.cudnn.benchmark = True
 torch.set_float32_matmul_precision('high')
-
-from game import Game2048, Action
-from interaction import BaseAgent
-from evaluation import RewardFunction
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from game.engine import Game2048, Action
+from agents.base import BaseAgent
+try:
+    from framework.evaluation import RewardFunction
+except ImportError:
+    RewardFunction = None
 
 # ═══════════════════════════════════════════════════════════════════
 #  CONSTANTS
@@ -1013,8 +1017,8 @@ if __name__ == "__main__":
         trainer.train(use_shaping=args.shaping, save_path=args.model)
 
     elif args.mode == "eval":
-        from interaction import InteractionModule
-        from utils import RunLogger
+        from framework.interaction import InteractionModule
+        from framework.logger import RunLogger
         logger = RunLogger()
         agent = PPOAgent(
             model_path=args.model, grid_size=grid_size, deterministic=True
@@ -1037,8 +1041,8 @@ if __name__ == "__main__":
         agent = PPOAgent(
             model_path=args.model, grid_size=grid_size, deterministic=True
         )
-        from interaction import InteractionModule
-        from utils import RunLogger
+        from framework.interaction import InteractionModule
+        from framework.logger import RunLogger
         logger = RunLogger()
         module = InteractionModule(config, agent, logger=logger, verbose=True, print_board=True)
         module.set_training_stats(
