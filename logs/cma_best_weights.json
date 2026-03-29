@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-03-08T12:33:08.527447+00:00",
+  "generation": 90,
+  "weights": {
+    "tile": 1.9708,
+    "empty": 1.2888,
+    "mono": 1.6159,
+    "corner": 2.2907,
+    "merge": 1.9457,
+    "smooth": 1.3083
+  },
+  "avg_score": 26642.0,
+  "max_score": 34440,
+  "win_rate": 80.0,
+  "max_highest_tile": 2048,
+  "tile_distribution": {
+    "1024": 2,
+    "2048": 8
+  },
+  "usage": "RewardFunction(weights={'tile': 1.9708, 'empty': 1.2888, 'mono': 1.6159, 'corner': 2.2907, 'merge': 1.9457, 'smooth': 1.3083})"
+}

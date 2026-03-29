@@ -1,113 +1,15 @@
 import time
 import json
 import numpy as np
-from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple, Any
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from game import Game2048, Action
-from evaluation import GameEvaluator, RewardFunction, REWARD_SEARCH
+from agents.base import BaseAgent
+from framework.evaluation import GameEvaluator, RewardFunction, REWARD_SEARCH
 
-
-# ═══════════════════════════════════════════════════════════════════
-#  BASE AGENT INTERFACE — all agents must implement this
-# ═══════════════════════════════════════════════════════════════════
-
-class BaseAgent(ABC):
-    """Abstract base class for all 2048 agents.
-
-    Every agent (MCTS, DQN, PPO, AlphaZero, Beam Search) must
-    subclass this and implement ``choose_action()``.
-
-    The Interaction Module calls ``choose_action()`` at every step,
-    passing the current board state, list of valid moves, and an
-    optional game context for agents that need deeper access
-    (e.g., MCTS needs to clone the game for simulations).
-
-    Attributes:
-        name: Human-readable agent name (used in eval reports).
-        agent_type: Slug used for log filename (override in subclasses).
-
-    Example::
-
-        class RandomAgent(BaseAgent):
-            def choose_action(self, state, available_moves, game_context):
-                return available_moves[np.random.randint(len(available_moves))]
-    """
-
-    # Override in subclasses: used as the log filename slug
-    # e.g. "beam_search" -> logs/beam_search_runs.jsonl
-    agent_type: str = "agent"
-
-    def __init__(self, name: str):
-        self.name = name
-
-    @abstractmethod
-    def choose_action(
-        self,
-        state: np.ndarray,
-        available_moves: List[Action],
-        game_context: Optional[Dict[str, Any]] = None,
-    ) -> Action:
-        """Select an action given the current game state.
-
-        Args:
-            state: Current board as a 2D numpy array. This is a copy —
-                modifying it won't affect the real game.
-            available_moves: List of valid Action values that would
-                change the board. Guaranteed non-empty.
-            game_context: Optional dict with extra info:
-                - 'game': the Game2048 instance (for cloning in search agents)
-                - 'score': current cumulative score
-                - 'move_number': how many moves have been played
-                - 'reward_fn': the RewardFunction instance
-
-        Returns:
-            Action: The chosen move direction.
-        """
-        ...
-
-    def on_episode_start(self):
-        """Called at the start of each game. Override for per-game setup."""
-        pass
-
-    def on_episode_end(self, final_state: np.ndarray, score: int):
-        """Called at the end of each game. Override for learning/logging.
-
-        Args:
-            final_state: The final board state.
-            score: The final merge score.
-        """
-        pass
-
-    def on_move_result(self, state: np.ndarray, action: Action,
-                       reward: int, next_state: np.ndarray, done: bool):
-        """Called after each move with the transition tuple.
-
-        This is the hook for RL agents to collect experience:
-            (s, a, r, s', done)
-
-        Search agents can ignore this.
-
-        Args:
-            state: Board before the move.
-            action: Action that was taken.
-            reward: Reward received from the move.
-            next_state: Board after the move (and tile spawn).
-            done: Whether the game is over.
-        """
-        pass
-
-    def get_params(self) -> Dict:
-        """Return agent-specific parameters for logging.
-
-        Override in subclasses to report architecture params like
-        beam_width, search_depth, num_simulations, etc.
-
-        Returns:
-            Dict of param_name -> value.
-        """
-        return {}
+# Re-export BaseAgent so old code using `from interaction import BaseAgent` still works
+__all__ = ['InteractionModule', 'run_comparison', 'BaseAgent']
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -133,8 +35,10 @@ def _run_single_episode(config, agent, reward_fn):
     game = Game2048(config)
     agent.on_episode_start()
 
+    episode_start = time.time()
     move_number = 0
     inference_times = []
+    reward_breakdowns = []
 
     while not game.is_game_over():
         available = game.get_available_moves()
@@ -161,6 +65,7 @@ def _run_single_episode(config, agent, reward_fn):
         next_state = game.get_state()
         done = game.is_game_over()
         agent.on_move_result(state, action, 0, next_state, done)
+        reward_breakdowns.append(reward_fn.compute_breakdown(next_state))
 
         move_number += 1
 
@@ -170,6 +75,12 @@ def _run_single_episode(config, agent, reward_fn):
 
     agent.on_episode_end(final_state, final_score)
 
+    # Average each breakdown component across all moves
+    avg_breakdown = {}
+    if reward_breakdowns:
+        for key in reward_breakdowns[0]:
+            avg_breakdown[key] = float(np.mean([b[key] for b in reward_breakdowns]))
+
     return {
         'score': final_score,
         'highest_tile': highest_tile,
@@ -177,6 +88,8 @@ def _run_single_episode(config, agent, reward_fn):
         'reached_2048': highest_tile >= 2048,
         'final_board': final_state,
         'inference_times': inference_times,
+        'avg_reward_breakdown': avg_breakdown,
+        'game_time_sec': time.time() - episode_start,
     }
 
 
@@ -199,7 +112,7 @@ class InteractionModule:
         agent: An instance of BaseAgent.
         reward_fn: RewardFunction instance for board evaluation.
             Defaults to REWARD_SEARCH.
-        logger: Optional RunLogger instance from utils.py. If provided,
+        logger: Optional RunLogger instance from framework/logger.py. If provided,
             board states and reward breakdowns are logged every move.
         verbose: If True, print per-episode stats during run.
         num_workers: Number of parallel workers for episode execution.
@@ -232,7 +145,7 @@ class InteractionModule:
 
     Example with logging (sequential only)::
 
-        from utils import RunLogger
+        from framework.logger import RunLogger
 
         logger = RunLogger()
         module = InteractionModule(
@@ -480,6 +393,22 @@ class InteractionModule:
                 )
                 self.evaluator.end_episode(final_game)
 
+                if self.logger:
+                    final_board_arr = np.array(ep_result['final_board'])
+                    final_breakdown = self.reward_fn.compute_breakdown(final_board_arr)
+                    self.logger.on_episode_start()
+                    self.logger._game_start = time.time() - ep_result['game_time_sec']
+                    self.logger._current_inference_times = ep_result['inference_times']
+                    self.logger._current_moves = [{'reward_breakdown': ep_result['avg_reward_breakdown']}]
+                    self.logger.end_episode(
+                        final_score=ep_result['score'],
+                        highest_tile=ep_result['highest_tile'],
+                        move_count=ep_result['moves'],
+                        reached_2048=ep_result['reached_2048'],
+                        final_board=final_board_arr,
+                        final_reward_breakdown=final_breakdown,
+                    )
+
                 if self.verbose:
                     print(f"  Game {completed:>4}/{num_games}  |  "
                           f"Score: {ep_result['score']:>8}  |  "
@@ -562,7 +491,7 @@ def run_comparison(
 
     Example::
 
-        from interaction import run_comparison
+        from framework.interaction import run_comparison
 
         results = run_comparison(
             config={"grid_size": 6},
@@ -571,7 +500,7 @@ def run_comparison(
             num_workers=8,
         )
     """
-    from evaluation import compare_agents
+    from framework.evaluation import compare_agents
 
     all_results = []
 
