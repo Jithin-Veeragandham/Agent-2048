@@ -585,20 +585,20 @@ class GameEvaluator:
         s = self.get_summary(agent_name)
 
         print(f"\n{'=' * 60}")
-        print(f"  {agent_name} — Evaluation Summary ({s['num_episodes']} games)")
+        print(f"  {agent_name} - Evaluation Summary ({s['num_episodes']} games)")
         print(f"{'=' * 60}")
 
         print(f"\n  PERFORMANCE METRICS")
-        print(f"  {'─' * 40}")
-        print(f"  Win Rate (≥2048):      {s['win_rate_2048']}%")
-        print(f"  Win Rate (≥4096):      {s['win_rate_4096']}%")
-        print(f"  Win Rate (≥8192):      {s['win_rate_8192']}%")
+        print(f"  {'-' * 40}")
+        print(f"  Win Rate (2048+):      {s['win_rate_2048']}%")
+        print(f"  Win Rate (4096+):      {s['win_rate_4096']}%")
+        print(f"  Win Rate (8192+):      {s['win_rate_8192']}%")
         print(f"  Avg Merge Score:       {s['avg_merge_score']}")
         print(f"  Avg Moves/Game:        {s['avg_moves_per_game']}")
         print(f"  Highest Tile Dist:     {s['highest_tile_distribution']}")
 
         print(f"\n  EFFICIENCY METRICS")
-        print(f"  {'─' * 40}")
+        print(f"  {'-' * 40}")
         print(f"  Avg Inference:         {s['avg_inference_ms']} ms/move")
         print(f"  95th %ile Inference:   {s['p95_inference_ms']} ms/move")
         if s['training_time_sec'] > 0:
