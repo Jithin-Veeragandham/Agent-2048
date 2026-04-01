@@ -319,14 +319,14 @@ class InteractionModule:
         print(f"\nRunning {self.agent.name} for {num_games} games "
               f"(grid: {self.config.get('grid_size', 4)}×"
               f"{self.config.get('grid_size', 4)}{mode_label})...")
-        print(f"{'─' * 50}")
+        print("-" * 50)
 
         if parallel:
             results = self._run_parallel(num_games)
         else:
             results = self._run_sequential(num_games)
 
-        print(f"{'─' * 50}")
+        print("-" * 50)
         print(f"Done.\n")
 
         if self.logger:
