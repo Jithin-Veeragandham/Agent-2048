@@ -34,8 +34,10 @@ Each line contains full context so you can filter/group/aggregate:
     p50_inference_ms— median inference time
     p95_inference_ms— 95th percentile inference time
     empty_cells     — empty cells on final board
-    avg_reward_breakdown   — per-move average of heuristic components
-    final_reward_breakdown — heuristic breakdown of the final board
+    avg_reward_breakdown         — per-move average of heuristic components
+    final_reward_breakdown       — heuristic breakdown of the final board
+    quartile_reward_breakdowns   — breakdowns sampled at Q25/Q50/Q75/Q100 of
+                                   the move sequence, for trajectory analysis
     final_board     — final board as nested list
 
 The latest run's full per-move detail is saved to:
@@ -118,11 +120,15 @@ class RunLogger:
         logger.save()
 
     Args:
-        log_dir: Directory for log files (created on save if missing).
+        log_dir:         Directory for log files (created on save if missing).
+        log_move_detail: If True, include the full per-move reward breakdown
+                         list in every game record (``move_reward_breakdowns``).
+                         Off by default — files are ~400x larger when enabled.
     """
 
-    def __init__(self, log_dir: str = "logs"):
+    def __init__(self, log_dir: str = "logs", log_move_detail: bool = False):
         self.log_dir = log_dir
+        self.log_move_detail = log_move_detail
 
         # ── Run-level state ───────────────────────────────────
         self._run_id: str = ""
@@ -218,16 +224,24 @@ class RunLogger:
         reached_2048: bool,
         final_board: np.ndarray,
         final_reward_breakdown: Dict[str, float],
+        quartile_reward_breakdowns: Optional[Dict] = None,
+        move_reward_breakdowns: Optional[List[Dict]] = None,
     ):
         """Finalize a game record.
 
         Args:
-            final_score:            Final cumulative score.
-            highest_tile:           Max tile on the final board.
-            move_count:             Total moves in this game.
-            reached_2048:           Whether 2048 tile was achieved.
-            final_board:            Final board state.
-            final_reward_breakdown: Breakdown of the final board.
+            final_score:                 Final cumulative score.
+            highest_tile:                Max tile on the final board.
+            move_count:                  Total moves in this game.
+            reached_2048:                Whether 2048 tile was achieved.
+            final_board:                 Final board state.
+            final_reward_breakdown:      Breakdown of the final board.
+            quartile_reward_breakdowns:  Pre-computed quartile snapshots
+                                         (used by parallel path). If None,
+                                         computed from self._current_moves.
+            move_reward_breakdowns:  Full per-move breakdown list (used by
+                                         parallel path when log_move_detail=True).
+                                         If None, extracted from self._current_moves.
         """
         game_time = time.time() - self._game_start
         inf_times = self._current_inference_times
@@ -241,9 +255,23 @@ class RunLogger:
             avg_inf = p50_inf = p95_inf = 0.0
 
         # Per-move average reward breakdown
-        avg_breakdown = _average_breakdowns(
-            [m['reward_breakdown'] for m in self._current_moves]
-        )
+        move_breakdowns = [m['reward_breakdown'] for m in self._current_moves]
+        avg_breakdown = _average_breakdowns(move_breakdowns)
+
+        # Quartile snapshots (Q25/Q50/Q75/Q100) — or use pre-computed from parallel path
+        if quartile_reward_breakdowns is not None:
+            quartiles = quartile_reward_breakdowns
+        else:
+            quartiles = _quartile_breakdowns(move_breakdowns)
+
+        # Full per-move list — only populated when log_move_detail=True
+        if self.log_move_detail:
+            if move_reward_breakdowns is not None:
+                per_move = move_reward_breakdowns  # parallel path
+            else:
+                per_move = move_breakdowns         # sequential path
+        else:
+            per_move = None
 
         # Empty cells on final board
         final_arr = final_board if isinstance(final_board, np.ndarray) else np.array(final_board)
@@ -286,8 +314,10 @@ class RunLogger:
             'tile_distribution':  tile_dist,
 
             # ── Reward breakdowns ─────────────────────────
-            'avg_reward_breakdown':   avg_breakdown,
-            'final_reward_breakdown': {k: round(v, 6) for k, v in final_reward_breakdown.items()},
+            'avg_reward_breakdown':         avg_breakdown,
+            'final_reward_breakdown':       {k: round(v, 6) for k, v in final_reward_breakdown.items()},
+            'quartile_reward_breakdowns':   quartiles,
+            **({'move_reward_breakdowns': per_move} if per_move is not None else {}),
 
             # ── Final board ───────────────────────────────
             'final_board':        final_arr.tolist(),
@@ -492,4 +522,35 @@ def _average_breakdowns(breakdowns: List[Dict[str, float]]) -> Dict[str, float]:
     return {
         k: round(float(np.mean([b[k] for b in breakdowns if k in b])), 6)
         for k in keys
+    }
+
+
+def _quartile_breakdowns(breakdowns: List[Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    """Sample reward breakdowns at Q25, Q50, Q75, Q100 of the move sequence.
+
+    Returns a dict like:
+        {
+            "q25":  {"tile_score": ..., "smoothness": ..., ...},
+            "q50":  {...},
+            "q75":  {...},
+            "q100": {...},   # same board as final_reward_breakdown
+        }
+
+    Use consecutive deltas (q50 - q25, etc.) to see what each agent
+    is optimising for across the arc of the game.
+    """
+    n = len(breakdowns)
+    if n == 0:
+        return {}
+    indices = {
+        'q25':  int(n * 0.25),
+        'q50':  int(n * 0.50),
+        'q75':  int(n * 0.75),
+        'q100': n - 1,
+    }
+    # clamp to valid range
+    indices = {label: min(max(idx, 0), n - 1) for label, idx in indices.items()}
+    return {
+        label: {k: round(float(v), 6) for k, v in breakdowns[idx].items()}
+        for label, idx in indices.items()
     }

@@ -1,5 +1,5 @@
 {
-  "grid_size": 6,
+  "grid_size": 4,
   "tile_2_probability": 0.9,
   "initial_tiles": 2,
   "random_seed": null,

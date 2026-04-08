@@ -29,7 +29,7 @@ Usage::
     python agents/alphazero.py --mode train --n_ep 500 --n_mcts 100
 
     # Evaluation
-    python agents/alphazero.py --mode eval --model models/alphazero_best.pt --num_games 10
+    python agents/alphazero.py --mode eval --model checkpoints/alphazero_best.pt --num_games 10
 
 Reference: tmoer.github.io/AlphaZero (Thomas Moerland, 2017)
 """
@@ -473,11 +473,14 @@ class AlphaZeroTrainer:
         buffer_size: int = 50000,
         save_dir: str = "models",
         eval_interval: int = 25,
+        ckpt_interval: int = 5,
         eval_games: int = 5,
         gamma: float = 0.99,
         n_games_per_ep: int = 2,
+        temp_start: float = 1.0,
         temp_anneal_ep: int = 200,
         temp_final: float = 0.1,
+        warmup_ep: int = 20,
         min_score_ratio: float = 0.7,
         fresh: bool = False,
         pretrain_model: Optional[str] = None,
@@ -490,11 +493,14 @@ class AlphaZeroTrainer:
         self.batch_size = batch_size
         self.save_dir = save_dir
         self.eval_interval = eval_interval
+        self.ckpt_interval = ckpt_interval
         self.eval_games = eval_games
         self.gamma = gamma
         self.n_games_per_ep = n_games_per_ep
+        self.temp_start = temp_start
         self.temp_anneal_ep = temp_anneal_ep
         self.temp_final = temp_final
+        self.warmup_ep = warmup_ep
         self.min_score_ratio = min_score_ratio
         self.config = {"grid_size": 4}
 
@@ -516,6 +522,7 @@ class AlphaZeroTrainer:
                 torch.load(pretrain_model, map_location=DEVICE, weights_only=True)
             )
             print(f"Loaded pre-trained weights from {pretrain_model}")
+
 
     def _save_checkpoint(self, ep: int):
         path = os.path.join(self.save_dir, "alphazero_checkpoint.pt")
@@ -628,8 +635,8 @@ class AlphaZeroTrainer:
         else:
             self.score_ema = 0.9 * self.score_ema + 0.1 * best_score
 
-        # Buffer filter: warmup for first 20 episodes, then apply threshold
-        warmup = ep < 20
+        # Buffer filter: warmup for first warmup_ep episodes, then apply threshold
+        warmup = ep < self.warmup_ep
         above_threshold = best_score >= self.score_ema * self.min_score_ratio
         if warmup or above_threshold:
             self._store_trajectory(best_traj, best_score)
@@ -689,8 +696,8 @@ class AlphaZeroTrainer:
         print(f"AlphaZero Training: {self.n_ep} episodes, "
               f"{self.n_mcts} MCTS sims/move, {self.n_chance} chance samples")
         print(f"Best-of-{self.n_games_per_ep} self-play | "
-              f"Temp: 1.0 -> {self.temp_final} over {self.temp_anneal_ep} eps | "
-              f"Buffer filter: {self.min_score_ratio:.0%} of EMA")
+              f"Temp: {self.temp_start} -> {self.temp_final} over {self.temp_anneal_ep} eps | "
+              f"Buffer filter: {self.min_score_ratio:.0%} of EMA (warmup={self.warmup_ep} eps)")
         print(f"Value targets: Monte Carlo returns (gamma={self.gamma})")
         print(f"Device: cpu (GPU skipped — MCTS bottleneck is Python loop, not matrix math)")
         if self.start_ep > 0:
@@ -706,9 +713,9 @@ class AlphaZeroTrainer:
         for ep in range(self.start_ep, self.n_ep):
             ep_start = time.time()
 
-            # Temperature schedule: linear decay 1.0 → temp_final
+            # Temperature schedule: linear decay temp_start → temp_final
             frac = min(1.0, ep / max(1, self.temp_anneal_ep))
-            temp = 1.0 - frac * (1.0 - self.temp_final)
+            temp = self.temp_start - frac * (self.temp_start - self.temp_final)
 
             score, max_tile = self.self_play_episode(ep, temp)
 
@@ -735,6 +742,10 @@ class AlphaZeroTrainer:
                   f"T:{temp:.2f} | WinRate: {100*total_wins/total_games:.0f}% | "
                   f"{ep_time:.1f}s (ETA: {eta_min:.0f}min)")
 
+            if (ep + 1) % self.ckpt_interval == 0:
+                self._save_checkpoint(ep)
+                print(f"  >>> Checkpoint saved (ep {ep+1})")
+
             if (ep + 1) % self.eval_interval == 0:
                 avg_score, win_rate, best_tile = self.evaluate(self.eval_games)
                 print(f"  >>> Eval ({self.eval_games} games): "
@@ -746,9 +757,6 @@ class AlphaZeroTrainer:
                     path = os.path.join(self.save_dir, "alphazero_best.pt")
                     torch.save(self.model.state_dict(), path)
                     print(f"  >>> New best! Saved to {path}")
-
-                self._save_checkpoint(ep)
-                print(f"  >>> Checkpoint saved (ep {ep+1})")
 
         self._save_checkpoint(self.n_ep - 1)
         print(f"\nTraining complete.")
@@ -831,21 +839,26 @@ if __name__ == "__main__":
     parser.add_argument("--n_ep", type=int, default=500)
     parser.add_argument("--n_mcts", type=int, default=100)
     parser.add_argument("--c", type=float, default=1.5)
-    parser.add_argument("--n_chance", type=int, default=3,
-                        help="Tile placements to sample per MCTS expansion")
+    parser.add_argument("--n_chance", type=int, default=1,
+                        help="Tile placements to sample per MCTS expansion (1=fast, 3=accurate)")
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--buffer_size", type=int, default=50000)
     parser.add_argument("--eval_interval", type=int, default=25)
+    parser.add_argument("--ckpt_interval", type=int, default=5)
     parser.add_argument("--eval_games", type=int, default=5)
-    parser.add_argument("--model", type=str, default="models/alphazero_best.pt")
+    parser.add_argument("--model", type=str, default="checkpoints/alphazero_best.pt")
     parser.add_argument("--num_games", type=int, default=10)
     parser.add_argument("--n_games_per_ep", type=int, default=2,
                         help="Games per episode (best-of-N stored)")
+    parser.add_argument("--temp_start", type=float, default=1.0,
+                        help="Starting temperature (use 0.5 with pretrained weights)")
     parser.add_argument("--temp_anneal_ep", type=int, default=200,
-                        help="Episodes over which to decay temperature 1.0->temp_final")
+                        help="Episodes over which to decay temperature temp_start->temp_final")
     parser.add_argument("--temp_final", type=float, default=0.1,
                         help="Final temperature after annealing")
+    parser.add_argument("--warmup_ep", type=int, default=20,
+                        help="Episodes before buffer filter activates (use 0 with pretrained weights)")
     parser.add_argument("--min_score_ratio", type=float, default=0.7,
                         help="Min score as fraction of EMA to store in buffer")
     parser.add_argument("--fresh", action="store_true",
@@ -864,10 +877,13 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             buffer_size=args.buffer_size,
             eval_interval=args.eval_interval,
+            ckpt_interval=args.ckpt_interval,
             eval_games=args.eval_games,
             n_games_per_ep=args.n_games_per_ep,
+            temp_start=args.temp_start,
             temp_anneal_ep=args.temp_anneal_ep,
             temp_final=args.temp_final,
+            warmup_ep=args.warmup_ep,
             min_score_ratio=args.min_score_ratio,
             fresh=args.fresh,
             pretrain_model=args.pretrain_model,

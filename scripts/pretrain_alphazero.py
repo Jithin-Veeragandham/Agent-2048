@@ -27,7 +27,7 @@ Usage::
     python agents/pretrain_alphazero.py --load_data data/pretrain_dataset.npz --epochs 30
 
     # Then start AlphaZero with pre-trained weights
-    python agents/alphazero.py --mode train --n_ep 500 --n_mcts 100 --fresh --pretrain_model models/alphazero_pretrained.pt
+    python agents/alphazero.py --mode train --n_ep 500 --n_mcts 100 --fresh --pretrain_model checkpoints/alphazero_pretrained.pt
 """
 
 import math
@@ -207,7 +207,7 @@ def pretrain(
     epochs: int = 20,
     batch_size: int = 256,
     lr: float = 0.001,
-    save_path: str = "models/alphazero_pretrained.pt",
+    save_path: str = "checkpoints/alphazero_pretrained.pt",
 ):
     """Train AlphaZero network on Expectimax demonstrations.
 
@@ -299,7 +299,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs",     type=int,   default=20)
     parser.add_argument("--batch_size", type=int,   default=256)
     parser.add_argument("--lr",         type=float, default=0.001)
-    parser.add_argument("--save",       type=str,   default="models/alphazero_pretrained.pt",
+    parser.add_argument("--save",       type=str,   default="checkpoints/alphazero_pretrained.pt",
                         help="Output model path")
     args = parser.parse_args()
 

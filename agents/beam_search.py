@@ -183,24 +183,28 @@ class BeamSearchAgent(BaseAgent):
 
         # Resolve evaluation function
         if reward_fn is not None:
+            self._reward_fn = reward_fn
             self.eval_fn = reward_fn.compute
         elif eval_fn is not None:
             self.eval_fn = eval_fn
         elif RewardFunction is not None:
             # Use project's RewardFunction with monotonicity-friendly weights
             self._reward_fn = RewardFunction(weights={
-                'tile': 1.0, 'empty': 0.5, 'mono': 1.5,
-                'corner': 0, 'merge': 0.5, 'smooth': 0.1,
+                'tile': 1.9708, 'empty': 1.2888, 'mono': 1.6159,
+                'corner': 2.2907, 'merge': 1.9457, 'smooth': 1.3083,
             })
             self.eval_fn = self._reward_fn.compute
         else:
             self.eval_fn = _default_heuristic
 
     def get_params(self) -> Dict:
-        return {
+        params = {
             'beam_width': self.beam_width,
             'search_depth': self.search_depth,
         }
+        if hasattr(self, '_reward_fn'):
+            params['reward_weights'] = self._reward_fn.weights
+        return params
 
     def choose_action(
         self,
@@ -281,10 +285,18 @@ if __name__ == "__main__":
     from framework.logger import RunLogger
 
     config = {"grid_size": 4}
+
     game_agent = BeamSearchAgent(
         beam_width=10,
         search_depth=15,
-        reward_fn=RewardFunction(weights={'tile': 1.9708, 'empty': 1.2888, 'mono': 1.6159, 'corner': 2.2907, 'merge': 1.9457, 'smooth': 1.3083})
+        reward_fn=RewardFunction(weights={
+            'tile':   1.9708,
+            'empty':  1.2888,
+            'mono':   1.6159,
+            'corner': 2.2907,
+            'merge':  1.9457,
+            'smooth': 1.3083,
+        })
     )
     logger = RunLogger()
 
@@ -293,8 +305,8 @@ if __name__ == "__main__":
         agent=game_agent,
         logger=logger,
         verbose=True,
-        print_board=True,
-        num_workers=10
+        print_board=False,
+        num_workers=10,
     )
     module.run(num_games=100)
     module.print_results()

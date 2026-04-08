@@ -815,7 +815,7 @@ class PPOTrainer:
 
             # ── Checkpoint ──
             if ep % checkpoint_interval == 0 and ep > 0:
-                ckpt_path = f"models/ppo_ep{ep}.pt"
+                ckpt_path = f"checkpoints/ppo_ep{ep}.pt"
                 self.save_model(ckpt_path)
 
         total_time = time.time() - start_time

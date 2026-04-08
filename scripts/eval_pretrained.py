@@ -10,7 +10,7 @@ AlphaZero self-play. Run in parallel while AlphaZero trains.
 
 Usage::
 
-    python agents/eval_pretrained.py --model models/alphazero_pretrained.pt --n_games 20
+    python agents/eval_pretrained.py --model checkpoints/alphazero_pretrained.pt --n_games 20
 """
 
 import sys
@@ -96,7 +96,7 @@ def play_greedy(model: AlphaZeroNetwork, n_games: int = 20) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model",   type=str, default="models/alphazero_pretrained.pt")
+    parser.add_argument("--model",   type=str, default="checkpoints/alphazero_pretrained.pt")
     parser.add_argument("--n_games", type=int, default=20)
     args = parser.parse_args()
 
@@ -105,7 +105,10 @@ if __name__ == "__main__":
         sys.exit(1)
 
     model = AlphaZeroNetwork()
-    model.load_state_dict(torch.load(args.model, map_location="cpu", weights_only=True))
+    ckpt = torch.load(args.model, map_location="cpu", weights_only=False)
+    # Support both raw state_dict (pretrained) and full checkpoint (training)
+    state_dict = ckpt.get("model_state_dict", ckpt)
+    model.load_state_dict(state_dict)
     print(f"Loaded: {args.model}")
 
     play_greedy(model, args.n_games)
