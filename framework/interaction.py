@@ -16,11 +16,7 @@ __all__ = ['InteractionModule', 'run_comparison', 'BaseAgent']
 #  STANDALONE EPISODE WORKER (top-level for pickling)
 # ═══════════════════════════════════════════════════════════════════
 
-<<<<<<< HEAD
-def _run_single_episode(config, agent, reward_fn):
-=======
 def _run_single_episode(config, agent, reward_fn, log_move_detail=False):
->>>>>>> origin/master
     """Play one complete game in a worker process.
 
     Top-level function so it can be pickled by ProcessPoolExecutor.
@@ -85,9 +81,6 @@ def _run_single_episode(config, agent, reward_fn, log_move_detail=False):
         for key in reward_breakdowns[0]:
             avg_breakdown[key] = float(np.mean([b[key] for b in reward_breakdowns]))
 
-<<<<<<< HEAD
-    return {
-=======
     # Quartile snapshots for trajectory analysis
     quartile_breakdowns = {}
     if reward_breakdowns:
@@ -104,7 +97,6 @@ def _run_single_episode(config, agent, reward_fn, log_move_detail=False):
         }
 
     result = {
->>>>>>> origin/master
         'score': final_score,
         'highest_tile': highest_tile,
         'moves': move_number,
@@ -112,17 +104,12 @@ def _run_single_episode(config, agent, reward_fn, log_move_detail=False):
         'final_board': final_state,
         'inference_times': inference_times,
         'avg_reward_breakdown': avg_breakdown,
-<<<<<<< HEAD
-        'game_time_sec': time.time() - episode_start,
-    }
-=======
         'quartile_reward_breakdowns': quartile_breakdowns,
         'game_time_sec': time.time() - episode_start,
     }
     if log_move_detail:
         result['move_reward_breakdowns'] = reward_breakdowns
     return result
->>>>>>> origin/master
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -267,11 +254,7 @@ class InteractionModule:
 
             # ── Log to logger (if present) ──
             if self.logger:
-<<<<<<< HEAD
-                breakdown = self.reward_fn.compute_breakdown(state)
-=======
                 breakdown = self.reward_fn.compute_breakdown(next_state)
->>>>>>> origin/master
                 self.logger.log_move(
                     step=move_number,
                     state=state,
@@ -355,22 +338,14 @@ class InteractionModule:
         print(f"\nRunning {self.agent.name} for {num_games} games "
               f"(grid: {self.config.get('grid_size', 4)}×"
               f"{self.config.get('grid_size', 4)}{mode_label})...")
-<<<<<<< HEAD
-        print(f"{'─' * 50}")
-=======
         print("-" * 50)
->>>>>>> origin/master
 
         if parallel:
             results = self._run_parallel(num_games)
         else:
             results = self._run_sequential(num_games)
 
-<<<<<<< HEAD
-        print(f"{'─' * 50}")
-=======
         print("-" * 50)
->>>>>>> origin/master
         print(f"Done.\n")
 
         if self.logger:
@@ -411,20 +386,14 @@ class InteractionModule:
 
         with ProcessPoolExecutor(max_workers=self.num_workers) as pool:
             futures = {}
-<<<<<<< HEAD
-=======
             log_move_detail = self.logger.log_move_detail if self.logger else False
->>>>>>> origin/master
             for i in range(num_games):
                 f = pool.submit(
                     _run_single_episode,
                     self.config,
                     self.agent,
                     self.reward_fn,
-<<<<<<< HEAD
-=======
                     log_move_detail,
->>>>>>> origin/master
                 )
                 futures[f] = i
 
@@ -459,11 +428,8 @@ class InteractionModule:
                         reached_2048=ep_result['reached_2048'],
                         final_board=final_board_arr,
                         final_reward_breakdown=final_breakdown,
-<<<<<<< HEAD
-=======
                         quartile_reward_breakdowns=ep_result.get('quartile_reward_breakdowns', {}),
                         move_reward_breakdowns=ep_result.get('move_reward_breakdowns'),
->>>>>>> origin/master
                     )
 
                 if self.verbose:
@@ -612,8 +578,4 @@ if __name__ == "__main__":
     agent = RandomAgent()
     module = InteractionModule(config, agent, verbose=True)
     module.run(num_games=20)
-<<<<<<< HEAD
     module.print_results()
-=======
-    module.print_results()
->>>>>>> origin/master
