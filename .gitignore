@@ -22,8 +22,6 @@ env/
 # OS
 Thumbs.db
 .DS_Store
-logs/
-
 archive/
 
 CLAUDE.md

@@ -34,28 +34,37 @@ AGENTS = {
         "file": "expectimax_snake_runs.jsonl",
         "color": "#2ecc71",
         "short": "Expectimax\nSnake",
+        "run_id": "20746c9b-5ff",
     },
     "MCTS": {
         "file": "mcts_runs.jsonl",
         "color": "#9b59b6",
         "short": "MCTS",
+        "run_id": "17602ce1-5bc",
     },
     "PPO": {
-        "file": "ppo_runs.jsonl",
+        "file": "PPO_runs.jsonl",
         "color": "#e74c3c",
         "short": "PPO",
+        "run_id": "aee9fc06-16d",
     },
-    "BeamSearch-Snake": {
-        "file": "beam_search_runs.jsonl",
-        "color": "#f39c12",
-        "short": "Beam\nSnake",
-        "run_id": "9e61f736-2c7",
-    },
-    "BeamSearch-CMA": {
+    "BeamSearch": {
         "file": "beam_search_runs.jsonl",
         "color": "#e67e22",
-        "short": "Beam\nCMA",
-        "run_id": "4987840e-c5a",
+        "short": "Beam\nSearch",
+        "run_id": "d2b82f14-d47",
+    },
+    "NTuple": {
+        "file": "ntuple_agent_runs.jsonl",
+        "color": "#1abc9c",
+        "short": "NTuple",
+        "run_id": "ea38ab60-f3b",
+    },
+    "DQN": {
+        "file": "dqn_4x4_runs.jsonl",
+        "color": "#3498db",
+        "short": "DQN",
+        "run_id": "d6f6f6a5-963",
     },
 }
 

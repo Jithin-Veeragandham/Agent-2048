@@ -228,7 +228,7 @@ if __name__ == "__main__":
     from framework.logger import RunLogger
 
     agent  = ExpectimaxSnakeAgent(depth=2)
-    logger = RunLogger()
+    logger = RunLogger(log_move_detail=True)
 
     module = InteractionModule(
         config={"grid_size": 4},
@@ -236,7 +236,7 @@ if __name__ == "__main__":
         logger=logger,
         verbose=True,
         print_board=False,
-        num_workers=6,
+        num_workers=13,
     )
     module.run(num_games=100)
     module.print_results()
