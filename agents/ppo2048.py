@@ -1020,7 +1020,7 @@ if __name__ == "__main__":
     elif args.mode == "eval":
         from framework.interaction import InteractionModule
         from framework.logger import RunLogger
-        logger = RunLogger()
+        logger = RunLogger(log_move_detail=True)
         agent = PPOAgent(
             model_path=args.model, grid_size=grid_size, deterministic=True
         )
@@ -1046,7 +1046,7 @@ if __name__ == "__main__":
         agent.agent_type = "PPO"
         from framework.interaction import InteractionModule
         from framework.logger import RunLogger
-        logger = RunLogger()
+        logger = RunLogger(log_move_detail=True)
         module = InteractionModule(config, agent, logger=logger, verbose=True, print_board=True)
         module.set_training_stats(
             training_time_sec=sum(
