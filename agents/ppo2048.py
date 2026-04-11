@@ -867,6 +867,7 @@ class PPOTrainer:
 
 class PPOAgent(BaseAgent):
     """Trained PPO agent for evaluation via InteractionModule."""
+    agent_type = "PPO"
 
     def __init__(self, model_path=None, grid_size=4,
                  deterministic=True, device=None):
@@ -1023,6 +1024,7 @@ if __name__ == "__main__":
         agent = PPOAgent(
             model_path=args.model, grid_size=grid_size, deterministic=True
         )
+        agent.agent_type = "PPO"
         module = InteractionModule(config=config, agent=agent, logger=logger, verbose=True)
         module.run(num_games=args.eval_games)
         module.print_results()
@@ -1041,6 +1043,7 @@ if __name__ == "__main__":
         agent = PPOAgent(
             model_path=args.model, grid_size=grid_size, deterministic=True
         )
+        agent.agent_type = "PPO"
         from framework.interaction import InteractionModule
         from framework.logger import RunLogger
         logger = RunLogger()
