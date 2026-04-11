@@ -1,604 +1,416 @@
 """
-alphazero2048.py
-================
+alphazero.py
+============
 
-AlphaZero-style agent for 2048.
+AlphaZero agent for 2048, based on tmoer.github.io/AlphaZero.
 
-Combines a dual-headed neural network (policy + value) with Monte Carlo
-Tree Search (MCTS) guided entirely by the network — no random rollouts.
+Combines Monte Carlo Tree Search with a neural network that provides
+both a policy prior (action probabilities) and a value estimate
+(expected future return). The network is trained via self-play:
+MCTS produces improved policy targets, and actual game returns
+provide stable value targets (Monte Carlo returns).
 
-Key differences from the original AlphaZero (designed for two-player games):
-    - 2048 is single-player with stochastic tile spawns.
-    - MCTS treats tile spawns as **chance nodes** (expectation over
-      possible spawn positions and values) rather than adversary moves.
-    - The value head predicts a normalized game score in [0, 1] rather
-      than win/loss in {-1, +1}.
-    - The policy target is the MCTS visit-count distribution over the
-      4 possible moves.
-
-Training loop:
-    1. Self-play: use MCTS (guided by current network) to play full games,
-       recording (state, π_mcts, final_score) at each step.
-    2. Training: sample mini-batches from a replay buffer and minimize
-       cross-entropy on policy + MSE on value.
-    3. Repeat — the improved network makes MCTS stronger, which generates
-       better training data, which further improves the network.
+Adaptations for 2048 (stochastic single-player game):
+    - Chance node sampling: at each MCTS leaf, N tile placements are
+      sampled and the network value is averaged, giving a stable
+      expectation over random tile spawns.
+    - Monte Carlo returns: value targets use actual discounted game
+      returns instead of bootstrapped Q-values, removing cold-start
+      noise from the training signal.
+    - No subtree reuse: random tile spawns make subtrees stale.
+    - Legal action masking throughout MCTS and inference.
 
 Usage::
 
-    # Train
-    python alphazero2048.py --mode train --epochs 200 --sims 100
+    # Training (fresh start)
+    python agents/alphazero.py --mode train --n_ep 500 --n_mcts 100 --fresh
 
-    # Evaluate
-    python alphazero2048.py --mode eval --model alphazero_model.pt --eval-games 100
+    # Resume from checkpoint
+    python agents/alphazero.py --mode train --n_ep 500 --n_mcts 100
 
-    # Full pipeline
-    python alphazero2048.py --mode full --epochs 200 --sims 100 --eval-games 100
+    # Evaluation
+    python agents/alphazero.py --mode eval --model checkpoints/alphazero_best.pt --num_games 10
+
+Reference: tmoer.github.io/AlphaZero (Thomas Moerland, 2017)
 """
 
-import os
-import sys
-import time
-import json
 import math
-import copy
 import random
-from typing import Dict, List, Optional, Tuple, Any
-from collections import deque
-
+import time
+import argparse
 import numpy as np
+from typing import Dict, List, Optional, Any, Tuple
+from collections import deque
+import sys
+import os
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from game.engine import Game2048, Action
 from agents.base import BaseAgent
-from framework.evaluation import RewardFunction
 
-# Minimal heuristic for AlphaZero — tile progress + small empty bonus.
-# Heavier shaping (mono, corner) is left for the network to learn.
-_AZ_REWARD_FN = RewardFunction(weights={
-    'tile': 1.0, 'empty': 0.1, 'mono': 0.0,
-    'corner': 0.0, 'merge': 0.0, 'smooth': 0.0,
-})
-_AZ_HEURISTIC_NORM = 1.1   # approximate upper bound of _AZ_REWARD_FN.compute()
-
-
-def _heuristic_value(board: np.ndarray) -> float:
-    """Board quality in [0, 1] via the AZ reward function."""
-    h = _AZ_REWARD_FN.compute(board)
-    return float(np.clip(h / _AZ_HEURISTIC_NORM, 0.0, 1.0))
 
 # ═══════════════════════════════════════════════════════════════════
 #  CONSTANTS
 # ═══════════════════════════════════════════════════════════════════
 
-NUM_ACTIONS = 4
-_VIRTUAL_LOSS = 3   # Penalty applied along selected path so parallel
-                    # simulations in the same wave explore different branches.
-ACTIONS = [Action.UP, Action.DOWN, Action.LEFT, Action.RIGHT]
-NUM_TILE_CHANNELS = 16  # exponents 0..15 → tiles 0, 2, 4, ..., 32768
+_ACTION_LIST = [Action.UP, Action.DOWN, Action.LEFT, Action.RIGHT]
+_NUM_ACTIONS = 4
+_NUM_TILE_CHANNELS = 16   # exponents 0-15 (tile values 0, 2, 4, ..., 32768)
+_V_SCALE = 30000.0        # normalise MC returns to roughly [-1, 1]
+
+# This model is bottlenecked by sequential MCTS Python calls, not matrix math.
+# GPU transfer overhead on tiny (1,16,4,4) tensors exceeds compute savings.
+# Everything runs on CPU; DEVICE kept for reporting only.
+DEVICE = torch.device("cpu")
+INFER_DEVICE = DEVICE
+TRAIN_DEVICE = DEVICE
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  INPUT ENCODING — one-hot exponent channels (same as PPO)
+#  FAST NUMPY BOARD OPS (move without spawning a tile)
 # ═══════════════════════════════════════════════════════════════════
 
-def encode_board(x: torch.Tensor) -> torch.Tensor:
-    """Convert (N, grid, grid) int board to (N, 16, grid, grid) one-hot."""
-    if x.dtype != torch.int64:
-        x = x.long()
-    exps = torch.zeros_like(x)
-    nonzero = x > 0
-    exps[nonzero] = torch.log2(x[nonzero].float()).long()
-    exps = exps.clamp(0, NUM_TILE_CHANNELS - 1)
-    one_hot = F.one_hot(exps, NUM_TILE_CHANNELS).float()
-    return one_hot.permute(0, 3, 1, 2)
+def _slide_row_left_np(row: np.ndarray) -> Tuple[np.ndarray, int]:
+    """Slide and merge a 4-element row leftward. Returns (new_row, score)."""
+    tiles = row[row != 0]
+    result = np.zeros(4, dtype=np.int64)
+    score = 0
+    i = j = 0
+    while i < len(tiles):
+        if i + 1 < len(tiles) and tiles[i] == tiles[i + 1]:
+            merged = int(tiles[i] * 2)
+            result[j] = merged
+            score += merged
+            i += 2
+        else:
+            result[j] = tiles[i]
+            i += 1
+        j += 1
+    return result, score
 
 
-def encode_board_np(board: np.ndarray) -> torch.Tensor:
-    """Encode a single numpy board to a (1, 16, grid, grid) tensor."""
-    t = torch.from_numpy(board.astype(np.int64)).unsqueeze(0)
-    return encode_board(t)
+def _apply_move_np(board: np.ndarray, action: Action) -> Tuple[np.ndarray, bool, int]:
+    """Apply a move WITHOUT spawning a tile.
+
+    Returns:
+        new_board: (4,4) int64 post-move board
+        changed:   whether the board changed
+        score_delta: points earned by merges
+    """
+    b = board.astype(np.int64)
+    new_board = np.empty((4, 4), dtype=np.int64)
+    score = 0
+
+    if action == Action.LEFT:
+        for r in range(4):
+            new_board[r], s = _slide_row_left_np(b[r])
+            score += s
+    elif action == Action.RIGHT:
+        for r in range(4):
+            rev, s = _slide_row_left_np(b[r, ::-1])
+            new_board[r] = rev[::-1]
+            score += s
+    elif action == Action.UP:
+        for c in range(4):
+            col, s = _slide_row_left_np(b[:, c])
+            new_board[:, c] = col
+            score += s
+    else:  # DOWN
+        for c in range(4):
+            col, s = _slide_row_left_np(b[::-1, c])
+            new_board[::-1, c] = col
+            score += s
+
+    changed = not np.array_equal(b, new_board)
+    return new_board, changed, score
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  DUAL-HEADED NETWORK — shared conv backbone, policy + value heads
+#  BOARD ENCODING
 # ═══════════════════════════════════════════════════════════════════
 
-class ResBlock(nn.Module):
-    """Residual block with two conv layers and batch norm."""
+def encode_board(board: np.ndarray) -> np.ndarray:
+    """One-hot encode tile exponents into (16, 4, 4) float32 array.
 
-    def __init__(self, channels: int):
-        super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(channels)
-        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(channels)
+    Channel i is 1 where log2(tile) == i (channel 0 = empty cells).
+    """
+    encoded = np.zeros((_NUM_TILE_CHANNELS, 4, 4), dtype=np.float32)
+    for r in range(4):
+        for c in range(4):
+            val = board[r, c]
+            if val == 0:
+                encoded[0, r, c] = 1.0
+            else:
+                exp = int(math.log2(val))
+                if exp < _NUM_TILE_CHANNELS:
+                    encoded[exp, r, c] = 1.0
+    return encoded
 
-    def forward(self, x):
-        residual = x
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = self.bn2(self.conv2(x))
-        x = F.relu(x + residual)
-        return x
 
+def encode_board_batch(boards: List[np.ndarray]) -> torch.Tensor:
+    """Encode a batch of boards into a (B, 16, 4, 4) tensor."""
+    return torch.from_numpy(np.stack([encode_board(b) for b in boards]))
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  NEURAL NETWORK (Policy + Value heads)
+# ═══════════════════════════════════════════════════════════════════
 
 class AlphaZeroNetwork(nn.Module):
-    """Dual-headed network: shared backbone → policy head + value head.
+    """CNN with shared backbone, policy head, and value head.
 
     Architecture:
-        - Input: one-hot encoded board (16 channels for tile exponents)
-        - Backbone: initial conv + N residual blocks
-        - Policy head: conv(1x1) → flatten → linear → softmax over 4 actions
-        - Value head: conv(1x1) → flatten → linear → tanh (scaled to [0, 1])
-
-    Args:
-        grid_size: Board dimension (default 4).
-        num_res_blocks: Number of residual blocks in the backbone.
-        channels: Number of channels in the backbone convolutions.
+        Input:  (B, 16, 4, 4) one-hot encoded board
+        Conv:   128 filters 3x3 (pad=1) -> BN -> ReLU
+                128 filters 3x3 (pad=1) -> BN -> ReLU
+        Flatten -> FC(2048, 256) -> ReLU
+        Policy: FC(256, 4) -> log_softmax
+        Value:  FC(256, 1) -> tanh (normalised to ~[-1, 1])
     """
 
-    def __init__(self, grid_size: int = 4, num_res_blocks: int = 5,
-                 channels: int = 128):
+    def __init__(self):
         super().__init__()
-        self.grid_size = grid_size
+        self.conv1 = nn.Conv2d(_NUM_TILE_CHANNELS, 128, 3, padding=1)
+        self.bn1   = nn.BatchNorm2d(128)
+        self.conv2 = nn.Conv2d(128, 128, 3, padding=1)
+        self.bn2   = nn.BatchNorm2d(128)
+        self.fc    = nn.Linear(128 * 4 * 4, 256)
+        self.policy_head = nn.Linear(256, _NUM_ACTIONS)
+        self.value_head  = nn.Linear(256, 1)
+        self.to(DEVICE)
 
-        # ── Shared backbone ──
-        self.input_conv = nn.Conv2d(NUM_TILE_CHANNELS, channels, 3, padding=1)
-        self.input_bn = nn.BatchNorm2d(channels)
-        self.res_blocks = nn.Sequential(
-            *[ResBlock(channels) for _ in range(num_res_blocks)]
-        )
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Returns (log_policy, value)."""
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc(x))
+        log_pi = F.log_softmax(self.policy_head(x), dim=1)
+        v = torch.tanh(self.value_head(x))
+        return log_pi, v
 
-        flat_size = channels * grid_size * grid_size
-
-        # ── Policy head ──
-        self.policy_conv = nn.Conv2d(channels, 2, 1)
-        self.policy_bn = nn.BatchNorm2d(2)
-        self.policy_fc = nn.Linear(2 * grid_size * grid_size, NUM_ACTIONS)
-
-        # ── Value head ──
-        self.value_conv = nn.Conv2d(channels, 1, 1)
-        self.value_bn = nn.BatchNorm2d(1)
-        self.value_fc1 = nn.Linear(grid_size * grid_size, 256)
-        self.value_fc2 = nn.Linear(256, 1)
-
-    def forward(self, x: torch.Tensor,
-                legal_mask: Optional[torch.Tensor] = None
-                ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass returning policy logits and value estimate.
-
-        Args:
-            x: Board tensor of shape (N, grid, grid) with int tile values.
-            legal_mask: Optional (N, 4) float tensor. 1 = legal, 0 = illegal.
-
-        Returns:
-            policy_logits: (N, 4) log-probabilities over actions.
-            value: (N,) scalar value estimates in [0, 1].
-        """
-        # Encode
-        x = encode_board(x)
-
-        # Backbone
-        x = F.relu(self.input_bn(self.input_conv(x)))
-        x = self.res_blocks(x)
-
-        # Policy head
-        p = F.relu(self.policy_bn(self.policy_conv(x)))
-        p = p.flatten(start_dim=1)
-        p = self.policy_fc(p)
-
-        # Mask illegal actions before softmax
-        if legal_mask is not None:
-            p = torch.where(
-                legal_mask == 0.0,
-                torch.full_like(p, -float('inf')),
-                p,
-            )
-
-        policy_logits = F.log_softmax(p, dim=-1)
-
-        # Value head — sigmoid maps to [0, 1] for normalized score
-        v = F.relu(self.value_bn(self.value_conv(x)))
-        v = v.flatten(start_dim=1)
-        v = F.relu(self.value_fc1(v))
-        v = torch.sigmoid(self.value_fc2(v)).squeeze(-1)
-
-        return policy_logits, v
-
-    def predict(self, board: np.ndarray, device: str = 'cpu'
-                ) -> Tuple[np.ndarray, float]:
-        """Single-board inference for MCTS.
-
-        Args:
-            board: (grid, grid) numpy array.
-            device: Torch device string.
-
-        Returns:
-            policy: (4,) numpy array of move probabilities.
-            value: Scalar value estimate in [0, 1].
-        """
-        was_training = self.training
+    def predict_pi(self, board: np.ndarray) -> np.ndarray:
+        """Single board -> policy priors (numpy float32)."""
         self.eval()
-        board_t = torch.from_numpy(board.astype(np.int64)).unsqueeze(0).to(device)
-
-        # Build legal mask
-        game_tmp = Game2048.from_state(board)
-        available = game_tmp.get_available_moves()
-        legal = torch.zeros(1, NUM_ACTIONS, device=device)
-        for a in available:
-            legal[0, a.value] = 1.0
-        if legal.sum() == 0:
-            legal[:] = 1.0
-
         with torch.no_grad():
-            log_probs, value = self(board_t, legal_mask=legal)
+            x = torch.from_numpy(encode_board(board)).unsqueeze(0)
+            log_pi, _ = self.forward(x)
+            return torch.exp(log_pi).squeeze(0).numpy()
 
-        if was_training:
-            self.train()
+    def predict_v(self, board: np.ndarray) -> float:
+        """Single board -> value estimate (float in [-1, 1])."""
+        self.eval()
+        with torch.no_grad():
+            x = torch.from_numpy(encode_board(board)).unsqueeze(0)
+            _, v = self.forward(x)
+            return v.item()
 
-        policy = torch.exp(log_probs).cpu().numpy()[0]
-        return policy, value.item()
+    def predict_pi_batch(self, boards: np.ndarray) -> np.ndarray:
+        """Batch of boards (N,4,4) -> policy priors (N,4) numpy."""
+        self.eval()
+        with torch.no_grad():
+            encoded = np.stack([encode_board(b) for b in boards])
+            x = torch.from_numpy(encoded)
+            log_pi, _ = self.forward(x)
+            return torch.exp(log_pi).numpy()
+
+    def predict_v_batch(self, boards: np.ndarray) -> np.ndarray:
+        """Batch of boards (N,4,4) -> values (N,) numpy."""
+        self.eval()
+        with torch.no_grad():
+            encoded = np.stack([encode_board(b) for b in boards])
+            x = torch.from_numpy(encoded)
+            _, v = self.forward(x)
+            return v.squeeze(1).numpy()
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  MCTS — Neural-network-guided, no random rollouts
+#  MCTS (AlphaZero-style with PUCT + chance node sampling)
 # ═══════════════════════════════════════════════════════════════════
 
 class MCTSNode:
-    """A node in the MCTS search tree.
+    """A node in the MCTS tree representing a concrete game state."""
 
-    Each node represents a game state. Edges to children represent
-    actions (UP/DOWN/LEFT/RIGHT). For 2048 specifically, after an
-    action is taken, a random tile spawns — we handle this by
-    averaging over a small sample of spawn outcomes.
-
-    Attributes:
-        state: The board state at this node.
-        parent: Parent node (None for root).
-        action: The action that led to this node from parent.
-        prior: Prior probability from the neural network policy.
-        visit_count: Number of times this node has been visited (N).
-        value_sum: Total accumulated value from backpropagation (W).
-        children: Dict mapping Action → MCTSNode.
-        is_expanded: Whether this node's children have been created.
-        is_terminal: Whether the game is over at this state.
-    """
-
-    __slots__ = ('state', 'score', 'parent', 'action', 'prior',
-                 'visit_count', 'value_sum', 'children',
-                 'is_expanded', 'is_terminal')
-
-    def __init__(self, state: np.ndarray, score: int = 0,
-                 parent: Optional['MCTSNode'] = None,
-                 action: Optional[Action] = None,
-                 prior: float = 0.0):
-        self.state = state
+    def __init__(self, board: np.ndarray, score: int, game_over: bool,
+                 parent_action_idx: Optional[int], model: AlphaZeroNetwork,
+                 legal_mask: np.ndarray):
+        self.board = board
         self.score = score
-        self.parent = parent
-        self.action = action
-        self.prior = prior
-        self.visit_count = 0
-        self.value_sum = 0.0
-        self.children: Dict[Action, 'MCTSNode'] = {}
-        self.is_expanded = False
-        self.is_terminal = False
+        self.game_over = game_over
+        self.parent_action_idx = parent_action_idx
+        self.n = 0
 
-    @property
-    def q_value(self) -> float:
-        """Mean action value Q = W / N."""
-        if self.visit_count == 0:
-            return 0.0
-        return self.value_sum / self.visit_count
+        self.legal_mask = legal_mask
 
-    def ucb_score(self, c_puct: float = 1.5) -> float:
-        """Upper Confidence Bound for Trees (PUCT formula).
+        if not game_over:
+            priors = model.predict_pi(board)
+            self.value = model.predict_v(board)
+            priors = priors * legal_mask
+            s = priors.sum()
+            self.priors = priors / s if s > 0 else legal_mask / legal_mask.sum()
+        else:
+            self.priors = np.zeros(_NUM_ACTIONS, dtype=np.float32)
+            self.value = 0.0
 
-        UCB(s, a) = Q(s, a) + c_puct * P(s, a) * sqrt(N_parent) / (1 + N_child)
+        self.child_W = np.zeros(_NUM_ACTIONS, dtype=np.float64)
+        self.child_n = np.zeros(_NUM_ACTIONS, dtype=np.int32)
+        self.child_Q = np.zeros(_NUM_ACTIONS, dtype=np.float64)
+        self.children: List[Optional['MCTSNode']] = [None] * _NUM_ACTIONS
 
-        This balances exploitation (Q) with exploration (prior × parent visits).
-        """
-        if self.parent is None:
-            return 0.0
-        exploration = (c_puct * self.prior
-                       * math.sqrt(self.parent.visit_count)
-                       / (1 + self.visit_count))
-        return self.q_value + exploration
+    def select_action(self, c: float = 1.5) -> int:
+        """PUCT selection: Q + prior * c * sqrt(N+1) / (n+1)."""
+        puct = self.child_Q + self.priors * c * (
+            math.sqrt(self.n + 1) / (self.child_n + 1)
+        )
+        puct = np.where(self.legal_mask, puct, -np.inf)
+        max_val = puct.max()
+        candidates = np.where(puct == max_val)[0]
+        return int(np.random.choice(candidates))
+
+    def update_child(self, action_idx: int, value: float):
+        self.child_n[action_idx] += 1
+        self.child_W[action_idx] += value
+        self.child_Q[action_idx] = self.child_W[action_idx] / self.child_n[action_idx]
+        self.n += 1
 
 
-class MCTS:
-    """Monte Carlo Tree Search guided by a neural network.
+def _chance_leaf_value(post_move_board: np.ndarray, score_delta: int,
+                       model: AlphaZeroNetwork, n_chance: int) -> float:
+    """Estimate leaf value by averaging over N random tile placements.
 
-    Instead of random rollouts (as in vanilla MCTS), leaf nodes
-    are evaluated by the value head of the network. The policy head
-    provides prior probabilities for action selection.
+    This approximates the expectation over the chance node:
+        E[V(s')] = sum_{empty cells} P(cell) * [0.9*V(cell+2) + 0.1*V(cell+4)]
 
-    For 2048's stochasticity: when expanding a node, we simulate
-    the action, then **sample a few random tile spawns** and create
-    child nodes for each. During selection, we average over these
-    spawn outcomes. This is cheaper than enumerating all possible
-    spawns (up to 2×empty_cells possibilities).
-
-    Args:
-        network: The AlphaZeroNetwork for policy + value inference.
-        num_simulations: MCTS iterations per move decision.
-        c_puct: Exploration constant in the PUCT formula.
-        device: Torch device for network inference.
-        num_spawn_samples: How many random tile spawns to sample
-            when expanding a node (approximates the expectation).
-        dirichlet_alpha: Alpha parameter for Dirichlet noise at root.
-        dirichlet_frac: Fraction of prior replaced by Dirichlet noise.
+    Using Monte Carlo sampling with n_chance samples.
     """
+    empty_cells = np.argwhere(post_move_board == 0)
+    if len(empty_cells) == 0:
+        # Board full — no tile spawn possible
+        child_value = model.predict_v(post_move_board)
+        return score_delta / _V_SCALE + 0.99 * child_value
 
-    def __init__(self, network: AlphaZeroNetwork,
-                 num_simulations: int = 100,
-                 c_puct: float = 1.5,
-                 device: str = 'cpu',
-                 num_spawn_samples: int = 3,
-                 dirichlet_alpha: float = 0.3,
-                 dirichlet_frac: float = 0.25,
-                 heuristic_weight: float = 0.5):
-        self.network = network
-        self.num_simulations = num_simulations
-        self.c_puct = c_puct
-        self.device = device
-        self.num_spawn_samples = num_spawn_samples
-        self.dirichlet_alpha = dirichlet_alpha
-        self.dirichlet_frac = dirichlet_frac
-        # Blend: leaf_value = (1-w)*network_value + w*heuristic_value.
-        # Starts at 0.5 (equal weight); can be set to 0.0 to disable.
-        self.heuristic_weight = heuristic_weight
+    n_samples = min(n_chance, len(empty_cells))
+    sample_boards = []
+    for _ in range(n_samples):
+        idx = np.random.randint(len(empty_cells))
+        r, c = empty_cells[idx]
+        tile = 2 if np.random.random() < 0.9 else 4
+        child = post_move_board.copy()
+        child[r, c] = tile
+        sample_boards.append(child)
 
-    def search(self, game: Game2048, temperature: float = 1.0,
-               wave_size: int = 8) -> Tuple[np.ndarray, float]:
-        """Run MCTS using wave-based batched leaf evaluation.
+    # Batch network call for efficiency
+    child_values = model.predict_v_batch(np.stack(sample_boards))
+    avg_child_value = float(child_values.mean())
+    return score_delta / _V_SCALE + 0.99 * avg_child_value
 
-        Instead of one network call per simulation, each wave selects
-        `wave_size` leaves simultaneously (using virtual loss so they
-        diverge), evaluates them all in a single batched GPU forward
-        pass, then backpropagates. This keeps the GPU busy and cuts
-        wall-clock time by ~wave_size× vs. single-leaf evaluation.
 
-        Args:
-            game: Current game instance (will be cloned internally).
-            temperature: τ for the final move distribution.
-            wave_size: Leaves evaluated per network call. Larger =
-                better GPU utilisation; too large = lower search quality.
-        """
-        root_state = game.get_state()
-        root = MCTSNode(state=root_state, score=game.get_score())
+def run_mcts(root_board: np.ndarray, root_score: int,
+             model: AlphaZeroNetwork, n_mcts: int, c: float,
+             config: Dict, n_chance: int = 3) -> Tuple[np.ndarray, float]:
+    """Run MCTS simulations and return (policy_target, value_target).
 
-        # Expand root individually so children exist for Dirichlet noise
-        self._expand_single(root)
-        self._add_dirichlet_noise(root)
+    Key improvement over naive MCTS:
+        At each leaf expansion, we apply the player move using fast numpy
+        ops (no tile spawn), then sample n_chance random tile placements
+        and average the network's value estimates. This gives a stable
+        expectation over chance outcomes rather than a single noisy sample.
 
-        sims_done = 0
-        while sims_done < self.num_simulations:
-            # ── Wave: select up to wave_size leaves ──
-            paths: List[List[MCTSNode]] = []   # path from root → leaf
-            leaves: List[MCTSNode] = []
+    Returns:
+        pi: (4,) visit counts normalised to a probability distribution
+        v:  visit-weighted Q-value at the root (used only for diagnostics;
+            training uses Monte Carlo returns instead)
+    """
+    game = Game2048.from_state(root_board, score=root_score, config=config)
+    legal_moves = game.get_available_moves()
+    legal_mask = np.array([a in legal_moves for a in _ACTION_LIST], dtype=np.float32)
 
-            for _ in range(wave_size):
-                if sims_done + len(leaves) >= self.num_simulations:
-                    break
-                path = []
-                node = root
-                while node.is_expanded and not node.is_terminal:
-                    node = self._select_child(node)
-                    path.append(node)
-                # Apply virtual loss so the next selection in this wave
-                # is discouraged from picking the same path
-                for n in path:
-                    n.visit_count += _VIRTUAL_LOSS
-                    n.value_sum  -= _VIRTUAL_LOSS
-                paths.append(path)
-                leaves.append(node)
+    root = MCTSNode(root_board, root_score, game.is_game_over(),
+                    None, model, legal_mask)
 
-            if not leaves:
+    if root.game_over:
+        return np.ones(_NUM_ACTIONS) / _NUM_ACTIONS, 0.0
+
+    for _ in range(n_mcts):
+        node = root
+        action_path = []
+
+        # ── Selection: descend until unexpanded node ──────────
+        while True:
+            if node.game_over:
+                leaf_value = 0.0
                 break
 
-            # ── Batch evaluate all leaves ──
-            # Separate terminals (cheap) from non-terminals (need network)
-            terminal_mask = [n.is_terminal for n in leaves]
-            non_terminal_nodes = [n for n, t in zip(leaves, terminal_mask) if not t]
+            a = node.select_action(c)
+            action_path.append((node, a))
 
-            # Single batched forward pass for all non-terminal leaves
-            if non_terminal_nodes:
-                states_np = np.stack([n.state for n in non_terminal_nodes])
-                policies_batch, values_batch = self._batch_predict(states_np)
-            else:
-                policies_batch, values_batch = [], []
-
-            # ── Expand leaves and collect values ──
-            nt_idx = 0
-            values: List[float] = []
-            for node, is_terminal in zip(leaves, terminal_mask):
-                if is_terminal:
-                    values.append(self._normalize_score(node.score))
-                else:
-                    policy = policies_batch[nt_idx]
-                    value  = float(values_batch[nt_idx])
-                    nt_idx += 1
-                    if self.heuristic_weight > 0.0:
-                        h = _heuristic_value(node.state)
-                        value = ((1.0 - self.heuristic_weight) * value
-                                 + self.heuristic_weight * h)
-                    self._expand_with_policy(node, policy)
-                    values.append(value)
-
-            # ── Remove virtual loss and backpropagate real value ──
-            for path, node, value in zip(paths, leaves, values):
-                for n in path:
-                    n.visit_count -= _VIRTUAL_LOSS
-                    n.value_sum  += _VIRTUAL_LOSS
-                self._backpropagate(node, value)
-                sims_done += 1
-
-        policy = self._get_policy(root, temperature)
-        return policy, root.q_value
-
-    def _batch_predict(self, states_np: np.ndarray
-                       ) -> Tuple[np.ndarray, np.ndarray]:
-        """Evaluate a batch of boards in one GPU forward pass.
-
-        Returns:
-            policies: (B, 4) numpy array of move probabilities.
-            values:   (B,)  numpy array of value estimates.
-        """
-        was_training = self.network.training
-        self.network.eval()
-
-        board_t = torch.from_numpy(states_np.astype(np.int64)).to(self.device)
-
-        # Build legal masks for the whole batch
-        B = len(states_np)
-        legal = torch.zeros(B, NUM_ACTIONS, device=self.device)
-        for i, board in enumerate(states_np):
-            g = Game2048.from_state(board)
-            for a in g.get_available_moves():
-                legal[i, a.value] = 1.0
-            if legal[i].sum() == 0:
-                legal[i] = 1.0
-
-        with torch.no_grad():
-            log_probs, values = self.network(board_t, legal_mask=legal)
-
-        if was_training:
-            self.network.train()
-
-        policies = torch.exp(log_probs).cpu().numpy()   # (B, 4)
-        values   = values.cpu().numpy()                  # (B,)
-        return policies, values
-
-    def _expand_single(self, node: MCTSNode) -> float:
-        """Expand one leaf with a single network call (used for root only)."""
-        game = Game2048.from_state(node.state, score=node.score)
-        if game.is_game_over():
-            node.is_terminal = True
-            node.is_expanded = True
-            return self._normalize_score(node.score)
-
-        policies, values = self._batch_predict(node.state[np.newaxis])
-        policy = policies[0]
-        value  = float(values[0])
-
-        if self.heuristic_weight > 0.0:
-            h = _heuristic_value(node.state)
-            value = (1.0 - self.heuristic_weight) * value + self.heuristic_weight * h
-
-        available = game.get_available_moves()
-        if not available:
-            node.is_terminal = True
-            node.is_expanded = True
-            return self._normalize_score(node.score)
-
-        self._expand_with_policy(node, policy)
-        return value
-
-    def _expand_with_policy(self, node: MCTSNode, policy: np.ndarray):
-        """Create children for a node given a precomputed policy array."""
-        game = Game2048.from_state(node.state, score=node.score)
-        available = game.get_available_moves()
-        if not available:
-            node.is_terminal = True
-            node.is_expanded = True
-            return
-        for action in available:
-            sim = game.clone()
-            valid, _ = sim.move(action)
-            if valid:
-                child = MCTSNode(
-                    state=sim.get_state(),
-                    score=sim.get_score(),
-                    parent=node,
-                    action=action,
-                    prior=policy[action.value],
+            if node.children[a] is None:
+                # ── Expansion ────────────────────────────────
+                # Apply move using fast numpy (no tile spawn yet)
+                post_board, changed, delta_score = _apply_move_np(
+                    node.board, _ACTION_LIST[a]
                 )
-                if sim.is_game_over():
-                    child.is_terminal = True
-                node.children[action] = child
-        node.is_expanded = True
 
-    def _select_child(self, node: MCTSNode) -> MCTSNode:
-        """Select the child with the highest UCB score."""
-        best_score = -float('inf')
-        best_child = None
-        for child in node.children.values():
-            score = child.ucb_score(self.c_puct)
-            if score > best_score:
-                best_score = score
-                best_child = child
-        return best_child
+                if not changed:
+                    # Illegal move slipped through legal_mask — penalise
+                    leaf_value = -1.0
+                    break
 
-    def _backpropagate(self, node: MCTSNode, value: float):
-        """Propagate the value estimate back up to the root."""
-        while node is not None:
-            node.visit_count += 1
-            node.value_sum += value
-            node = node.parent
+                # Chance node: sample n_chance tile outcomes, average V
+                leaf_value = _chance_leaf_value(
+                    post_board, delta_score, model, n_chance
+                )
 
-    def _add_dirichlet_noise(self, root: MCTSNode):
-        """Add Dirichlet noise to root priors for exploration.
+                # Build child node with ONE actual tile spawn (for tree)
+                sim_game = Game2048.from_state(
+                    node.board, score=node.score, config=config
+                )
+                valid, _ = sim_game.move(_ACTION_LIST[a])
+                if not valid:
+                    leaf_value = -1.0
+                    break
 
-        This ensures the agent doesn't always follow the network's
-        initial policy and can discover better strategies.
-        """
-        if not root.children:
-            return
-        actions = list(root.children.keys())
-        noise = np.random.dirichlet(
-            [self.dirichlet_alpha] * len(actions)
-        )
-        frac = self.dirichlet_frac
-        for i, action in enumerate(actions):
-            child = root.children[action]
-            child.prior = (1 - frac) * child.prior + frac * noise[i]
+                child_board = sim_game.get_state()
+                child_score = sim_game.get_score()
+                child_over  = sim_game.is_game_over()
+                child_legal = (
+                    np.array([act in sim_game.get_available_moves()
+                               for act in _ACTION_LIST], dtype=np.float32)
+                    if not child_over
+                    else np.zeros(_NUM_ACTIONS, dtype=np.float32)
+                )
 
-    def _get_policy(self, root: MCTSNode, temperature: float
-                    ) -> np.ndarray:
-        """Convert root visit counts to a move probability distribution.
-
-        Args:
-            root: The root node after search.
-            temperature: τ for the softmax. τ=1 is proportional to
-                visit counts; τ→0 is greedy.
-
-        Returns:
-            (4,) numpy array of move probabilities.
-        """
-        visits = np.zeros(NUM_ACTIONS, dtype=np.float64)
-        for action, child in root.children.items():
-            visits[action.value] = child.visit_count
-
-        if temperature < 1e-3:
-            # Greedy: pick the most-visited action
-            policy = np.zeros(NUM_ACTIONS, dtype=np.float64)
-            if visits.sum() > 0:
-                policy[np.argmax(visits)] = 1.0
+                node.children[a] = MCTSNode(
+                    child_board, child_score, child_over,
+                    a, model, child_legal
+                )
+                break
             else:
-                policy[:] = 0.25
-            return policy
+                node = node.children[a]
 
-        # Softmax with temperature
-        visits_temp = visits ** (1.0 / temperature)
-        total = visits_temp.sum()
-        if total > 0:
-            return visits_temp / total
-        else:
-            return np.ones(NUM_ACTIONS) / NUM_ACTIONS
+        # ── Backpropagation ───────────────────────────────────
+        for (ancestor, action_idx) in reversed(action_path):
+            ancestor.update_child(action_idx, leaf_value)
+            leaf_value = 0.99 * leaf_value  # discount as we go up
 
-    @staticmethod
-    def _normalize_score(score: int) -> float:
-        """Normalize a game score to [0, 1] for the value target.
+    # ── Extract policy target ─────────────────────────────────
+    counts = root.child_n.astype(np.float64)
+    count_sum = counts.sum()
+    if count_sum > 0:
+        pi_target = counts / count_sum
+    else:
+        pi_target = legal_mask / legal_mask.sum()
 
-        Uses a logarithmic mapping: log(1 + score) / log(1 + max_expected).
-        A score of ~100,000 (very strong 2048 game) maps to ~1.0.
-        """
-        max_expected = 100000.0
-        return math.log(1 + score) / math.log(1 + max_expected)
+    # Q-value for diagnostics (not used as training target)
+    v_target = float(np.sum((counts / count_sum) * root.child_Q)) if count_sum > 0 else 0.0
+
+    return pi_target, v_target
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -606,151 +418,31 @@ class MCTS:
 # ═══════════════════════════════════════════════════════════════════
 
 class ReplayBuffer:
-    """Fixed-size buffer storing self-play experience.
+    """Fixed-size FIFO buffer for (board, pi_target, v_target) tuples."""
 
-    Each entry is a tuple: (board_state, mcts_policy, value_target).
-    The value target is the normalized final score of the game
-    from which this state was sampled.
+    def __init__(self, max_size: int = 50000):
+        self.buffer = deque(maxlen=max_size)
 
-    Args:
-        capacity: Maximum number of entries. Oldest entries are
-            discarded when full (FIFO).
-    """
-
-    def __init__(self, capacity: int = 100_000):
-        self.buffer = deque(maxlen=capacity)
-
-    def push(self, state: np.ndarray, policy: np.ndarray,
-             value: float):
-        """Add a single training example."""
-        self.buffer.append((
-            state.copy(),
-            policy.copy(),
-            value,
-        ))
-
-    def push_game(self, states: List[np.ndarray],
-                  policies: List[np.ndarray],
-                  final_score: int,
-                  heuristic_weight: float = 0.3):
-        """Add all transitions from a completed game.
-
-        Value target per state blends the normalized final score with
-        a per-state board heuristic, giving a richer training signal
-        (especially early in training when the final score is near 0).
-
-        Args:
-            heuristic_weight: Weight for the per-state heuristic
-                (0.0 = pure score, 1.0 = pure heuristic).
-        """
-        z = MCTS._normalize_score(final_score)
-        for state, policy in zip(states, policies):
-            if heuristic_weight > 0.0:
-                h = _heuristic_value(state)
-                value = (1.0 - heuristic_weight) * z + heuristic_weight * h
-            else:
-                value = z
-            self.push(state, policy, value)
-
-    def sample(self, batch_size: int
-               ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Sample a random mini-batch.
-
-        Returns:
-            states: (B, grid, grid) int array.
-            policies: (B, 4) float array.
-            values: (B,) float array.
-        """
-        indices = np.random.choice(
-            len(self.buffer), size=min(batch_size, len(self.buffer)),
-            replace=False
-        )
-        batch = [self.buffer[i] for i in indices]
-
-        states = np.stack([b[0] for b in batch])
-        policies = np.stack([b[1] for b in batch])
-        values = np.array([b[2] for b in batch], dtype=np.float32)
-
-        return states, policies, values
+    def store(self, board: np.ndarray, pi: np.ndarray, v: float):
+        self.buffer.append((board, pi, v))
 
     def __len__(self):
         return len(self.buffer)
 
-
-# ═══════════════════════════════════════════════════════════════════
-#  SELF-PLAY — generate training data
-# ═══════════════════════════════════════════════════════════════════
-
-def self_play_game(
-    network: AlphaZeroNetwork,
-    config: Dict,
-    num_simulations: int = 100,
-    c_puct: float = 1.5,
-    device: str = 'cpu',
-    temperature_threshold: int = 30,
-    heuristic_weight: float = 0.5,
-) -> Tuple[List[np.ndarray], List[np.ndarray], int]:
-    """Play one complete game using MCTS, collecting training data.
-
-    For the first `temperature_threshold` moves, use temperature=1
-    for exploration. After that, switch to temperature≈0 (greedy)
-    for stronger play.
-
-    Args:
-        network: Current AlphaZeroNetwork.
-        config: Game config dict.
-        num_simulations: MCTS iterations per move.
-        c_puct: Exploration constant for MCTS.
-        device: Torch device.
-        temperature_threshold: Move number after which τ → 0.
-
-    Returns:
-        states: List of board states visited during the game.
-        policies: List of MCTS-derived policy distributions.
-        final_score: The game's final merge score.
-    """
-    game = Game2048(config)
-    mcts = MCTS(network, num_simulations, c_puct, device,
-                heuristic_weight=heuristic_weight)
-
-    states = []
-    policies = []
-    move_count = 0
-
-    while not game.is_game_over():
-        available = game.get_available_moves()
-        if not available:
-            break
-
-        # Temperature scheduling
-        temperature = 1.0 if move_count < temperature_threshold else 0.1
-
-        # Record current state
-        state = game.get_state()
-        states.append(state)
-
-        # Run MCTS search
-        policy, _ = mcts.search(game, temperature=temperature)
-        policies.append(policy)
-
-        # Select action from the MCTS policy
-        if temperature < 0.5:
-            # Near-greedy
-            action_idx = np.argmax(policy)
-        else:
-            # Sample from the distribution
-            action_idx = np.random.choice(NUM_ACTIONS, p=policy)
-
-        action = ACTIONS[action_idx]
-
-        # Ensure we pick a legal action
-        if action not in available:
-            action = available[0]
-
-        game.move(action)
-        move_count += 1
-
-    return states, policies, game.get_score()
+    def sample_batch(self, batch_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_size = min(batch_size, len(self.buffer))
+        indices = random.sample(range(len(self.buffer)), batch_size)
+        boards, pis, vs = [], [], []
+        for i in indices:
+            b, p, v = self.buffer[i]
+            boards.append(encode_board(b))
+            pis.append(p)
+            vs.append(v)
+        return (
+            torch.from_numpy(np.stack(boards)),
+            torch.from_numpy(np.stack(pis)),
+            torch.tensor(vs, dtype=torch.float32).unsqueeze(1),
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -758,525 +450,465 @@ def self_play_game(
 # ═══════════════════════════════════════════════════════════════════
 
 class AlphaZeroTrainer:
-    """Full AlphaZero training pipeline: self-play → train → repeat.
+    """AlphaZero training loop with improvements for single-player stochastic games:
 
-    Each epoch consists of:
-        1. Self-play: play `games_per_epoch` games using MCTS
-           guided by the current network, storing (state, π, z)
-           tuples in a replay buffer.
-        2. Training: sample mini-batches from the buffer and
-           update the network to minimize:
-               L = CE(π_mcts, π_net) + MSE(z, v_net) + c·‖θ‖²
-
-    Args:
-        config: Game configuration dict.
-        grid_size: Board dimension.
-        num_res_blocks: Residual blocks in the network.
-        channels: Conv channels in the network.
-        num_simulations: MCTS simulations per move.
-        c_puct: MCTS exploration constant.
-        lr: Learning rate.
-        weight_decay: L2 regularization.
-        buffer_capacity: Replay buffer size.
-        batch_size: Mini-batch size for training.
-        epochs: Number of self-play + training cycles.
-        games_per_epoch: Self-play games per epoch.
-        train_steps_per_epoch: Gradient updates per epoch.
-        device: Torch device (auto-detected if None).
+    1. Chance node sampling: MCTS leaf values average over N tile placements.
+    2. Monte Carlo returns: value targets use actual discounted game returns.
+    3. Best-of-N self-play: play N games per episode, store only the best.
+       Prevents bad games from polluting the replay buffer.
+    4. Temperature schedule: linearly decay exploration from 1.0 → temp_final
+       over temp_anneal_ep episodes, then stay greedy.
+    5. Buffer score filter: reject trajectories below min_score_ratio * EMA
+       of recent scores (with warmup period). Breaks negative feedback loop.
     """
 
     def __init__(
         self,
-        config: Optional[Dict] = None,
-        grid_size: int = 4,
-        num_res_blocks: int = 5,
-        channels: int = 128,
-        num_simulations: int = 100,
-        c_puct: float = 1.5,
-        lr: float = 1e-3,
-        weight_decay: float = 1e-4,
-        buffer_capacity: int = 100_000,
-        batch_size: int = 256,
-        epochs: int = 200,
-        games_per_epoch: int = 25,
-        train_steps_per_epoch: int = 100,
-        device: Optional[str] = None,
-        heuristic_weight: float = 0.5,
+        n_ep: int = 500,
+        n_mcts: int = 100,
+        c: float = 1.5,
+        n_chance: int = 3,
+        lr: float = 0.001,
+        batch_size: int = 64,
+        buffer_size: int = 50000,
+        save_dir: str = "models",
+        eval_interval: int = 25,
+        ckpt_interval: int = 5,
+        eval_games: int = 5,
+        gamma: float = 0.99,
+        n_games_per_ep: int = 2,
+        temp_start: float = 1.0,
+        temp_anneal_ep: int = 200,
+        temp_final: float = 0.1,
+        warmup_ep: int = 20,
+        min_score_ratio: float = 0.7,
+        fresh: bool = False,
+        pretrain_model: Optional[str] = None,
     ):
-        self.config = config or {'grid_size': grid_size}
-        self.grid_size = self.config.get('grid_size', grid_size)
-        self.num_simulations = num_simulations
-        self.c_puct = c_puct
+        self.n_ep = n_ep
+        self.n_mcts = n_mcts
+        self.c = c
+        self.n_chance = n_chance
+        self.lr = lr
         self.batch_size = batch_size
-        self.epochs = epochs
-        self.games_per_epoch = games_per_epoch
-        self.train_steps_per_epoch = train_steps_per_epoch
-        self.heuristic_weight = heuristic_weight
+        self.save_dir = save_dir
+        self.eval_interval = eval_interval
+        self.ckpt_interval = ckpt_interval
+        self.eval_games = eval_games
+        self.gamma = gamma
+        self.n_games_per_ep = n_games_per_ep
+        self.temp_start = temp_start
+        self.temp_anneal_ep = temp_anneal_ep
+        self.temp_final = temp_final
+        self.warmup_ep = warmup_ep
+        self.min_score_ratio = min_score_ratio
+        self.config = {"grid_size": 4}
 
-        if device:
-            self.device = device
-        elif torch.cuda.is_available():
-            self.device = 'cuda'
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            self.device = 'mps'
-        else:
-            self.device = 'cpu'
+        self.model = AlphaZeroNetwork()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-4)
+        self.buffer = ReplayBuffer(max_size=buffer_size)
 
-        self.network = AlphaZeroNetwork(
-            grid_size=self.grid_size,
-            num_res_blocks=num_res_blocks,
-            channels=channels,
-        ).to(self.device)
+        os.makedirs(save_dir, exist_ok=True)
 
-        self.optimizer = optim.AdamW(
-            self.network.parameters(), lr=lr, weight_decay=weight_decay
-        )
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=epochs
-        )
+        self.best_avg_score = 0.0
+        self.start_ep = 0
+        self.score_ema: Optional[float] = None  # exponential moving avg of scores
 
-        self.buffer = ReplayBuffer(capacity=buffer_capacity)
-        self.training_history: List[Dict] = []
-        self.total_games: int = 0
-        self.historical_max_tile: int = 0
-        self.total_training_time: float = 0.0
+        ckpt_path = os.path.join(save_dir, "alphazero_checkpoint.pt")
+        if not fresh and os.path.exists(ckpt_path):
+            self._load_checkpoint(ckpt_path)
+        elif fresh and pretrain_model and os.path.exists(pretrain_model):
+            self.model.load_state_dict(
+                torch.load(pretrain_model, map_location=DEVICE, weights_only=True)
+            )
+            print(f"Loaded pre-trained weights from {pretrain_model}")
 
-    def train(self, save_path: Optional[str] = None,
-              log_interval: int = 1):
-        """Run the full AlphaZero training loop.
 
-        Args:
-            save_path: Where to save the final model.
-            log_interval: Print stats every N epochs.
-        """
-        print(f"\n{'=' * 65}", flush=True)
-        print(f"  AlphaZero Training", flush=True)
-        print(f"  {self.grid_size}×{self.grid_size} | "
-              f"{self.num_simulations} MCTS sims/move | "
-              f"{self.epochs} epochs", flush=True)
-        print(f"  {self.games_per_epoch} games/epoch | "
-              f"{self.train_steps_per_epoch} train steps/epoch", flush=True)
-        print(f"  LR={self.optimizer.param_groups[0]['lr']:.1e} | "
-              f"Batch={self.batch_size} | Device: {self.device}", flush=True)
-        print(f"  Network: {sum(p.numel() for p in self.network.parameters()):,} params", flush=True)
-        print(f"{'=' * 65}\n", flush=True)
-
-        os.makedirs("models", exist_ok=True)
-        start_time = time.time()
-        checkpoint_interval = max(1, self.epochs // 10)
-
-        for epoch in range(self.epochs):
-            epoch_start = time.time()
-
-            # ── Phase 1: Self-play ──
-            self.network.eval()
-            sp_states_total = 0
-            sp_scores = []
-            sp_max_tiles = []
-
-            for g in range(self.games_per_epoch):
-                print(
-                    f"  Epoch {epoch}/{self.epochs} — self-play "
-                    f"{g + 1}/{self.games_per_epoch} ...",
-                    end="\r", flush=True,
-                )
-                states, policies, final_score = self_play_game(
-                    network=self.network,
-                    config=self.config,
-                    num_simulations=self.num_simulations,
-                    c_puct=self.c_puct,
-                    device=self.device,
-                    heuristic_weight=self.heuristic_weight,
-                )
-
-                # Push entire game to replay buffer
-                self.buffer.push_game(states, policies, final_score,
-                                      heuristic_weight=self.heuristic_weight)
-                sp_states_total += len(states)
-                sp_scores.append(final_score)
-
-                # Track max tile
-                if states:
-                    max_tile = int(np.max(states[-1]))
-                    sp_max_tiles.append(max_tile)
-                    self.historical_max_tile = max(
-                        self.historical_max_tile, max_tile
-                    )
-
-                self.total_games += 1
-
-            sp_time = time.time() - epoch_start
-
-            # ── Phase 2: Network training ──
-            train_start = time.time()
-            self.network.train()
-
-            total_policy_loss = 0.0
-            total_value_loss = 0.0
-            num_updates = 0
-
-            if len(self.buffer) >= self.batch_size:
-                for _ in range(self.train_steps_per_epoch):
-                    states_np, policies_np, values_np = self.buffer.sample(
-                        self.batch_size
-                    )
-
-                    states_t = torch.from_numpy(states_np).to(
-                        dtype=torch.int64, device=self.device
-                    )
-                    target_policies = torch.from_numpy(policies_np).to(
-                        dtype=torch.float32, device=self.device
-                    )
-                    target_values = torch.from_numpy(values_np).to(
-                        dtype=torch.float32, device=self.device
-                    )
-
-                    # Build legal mask from MCTS policy targets:
-                    # actions with non-zero target probability were legal
-                    legal_mask = (target_policies > 0).float()
-
-                    # Forward pass
-                    pred_log_policy, pred_value = self.network(
-                        states_t, legal_mask=legal_mask
-                    )
-
-                    # Policy loss: cross-entropy with MCTS targets
-                    # = -Σ π_mcts(a) · log π_net(a)
-                    policy_loss = -(target_policies * pred_log_policy).sum(dim=1).mean()
-
-                    # Value loss: MSE between predicted and actual game value
-                    value_loss = F.mse_loss(pred_value, target_values)
-
-                    # Combined loss
-                    loss = policy_loss + value_loss
-
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(
-                        self.network.parameters(), max_norm=1.0
-                    )
-                    self.optimizer.step()
-
-                    total_policy_loss += policy_loss.item()
-                    total_value_loss += value_loss.item()
-                    num_updates += 1
-
-            self.scheduler.step()
-            train_time = time.time() - train_start
-            epoch_time = time.time() - epoch_start
-            self.total_training_time += epoch_time
-
-            # ── Logging ──
-            avg_pl = total_policy_loss / max(num_updates, 1)
-            avg_vl = total_value_loss / max(num_updates, 1)
-            avg_score = np.mean(sp_scores) if sp_scores else 0
-            avg_max_tile = int(np.mean(sp_max_tiles)) if sp_max_tiles else 0
-
-            self.training_history.append({
-                'epoch': epoch,
-                'avg_score': round(float(avg_score), 1),
-                'max_tile_this_epoch': max(sp_max_tiles) if sp_max_tiles else 0,
-                'historical_max_tile': self.historical_max_tile,
-                'policy_loss': round(avg_pl, 4),
-                'value_loss': round(avg_vl, 4),
-                'buffer_size': len(self.buffer),
-                'sp_states': sp_states_total,
-                'sp_time_sec': round(sp_time, 1),
-                'train_time_sec': round(train_time, 1),
-                'total_games': self.total_games,
-            })
-
-            if epoch % log_interval == 0:
-                elapsed = time.time() - start_time
-                lr = self.scheduler.get_last_lr()[0]
-                print(
-                    f"  Epoch {epoch:>4}/{self.epochs}  |  "
-                    f"Score: {avg_score:>8.0f}  |  "
-                    f"Max tile: {self.historical_max_tile:>5}  |  "
-                    f"PL: {avg_pl:.4f}  VL: {avg_vl:.4f}  |  "
-                    f"Buf: {len(self.buffer):>6}  |  "
-                    f"SP: {sp_time:.1f}s  Train: {train_time:.1f}s  |  "
-                    f"LR: {lr:.1e}",
-                    flush=True,
-                )
-
-            # ── Checkpoint ──
-            if (epoch + 1) % checkpoint_interval == 0 and epoch > 0:
-                ckpt_path = f"models/alphazero_ep{epoch + 1}.pt"
-                self.save_model(ckpt_path)
-
-        total_time = time.time() - start_time
-        print(f"\n{'=' * 65}", flush=True)
-        print(f"  Done in {total_time:.1f}s | "
-              f"Games: {self.total_games:,} | "
-              f"Max tile: {self.historical_max_tile}", flush=True)
-        print(f"  Buffer: {len(self.buffer):,} entries", flush=True)
-        print(f"{'=' * 65}\n", flush=True)
-
-        if save_path:
-            self.save_model(save_path)
-
-    def save_model(self, path: str):
-        """Save model checkpoint."""
-        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+    def _save_checkpoint(self, ep: int):
+        path = os.path.join(self.save_dir, "alphazero_checkpoint.pt")
         torch.save({
-            'model_state_dict': self.network.state_dict(),
+            'episode': ep,
+            'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'grid_size': self.grid_size,
-            'total_games': self.total_games,
-            'training_history': self.training_history,
-            'historical_max_tile': self.historical_max_tile,
-            'total_training_time': self.total_training_time,
+            'best_avg_score': self.best_avg_score,
+            'score_ema': self.score_ema,
+            'buffer': list(self.buffer.buffer),
         }, path)
-        print(f"  Saved: {path}")
 
-    def load_model(self, path: str):
-        """Load model checkpoint."""
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        self.network.load_state_dict(ckpt['model_state_dict'])
-        if 'optimizer_state_dict' in ckpt:
-            self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        self.total_games = ckpt.get('total_games', 0)
-        self.training_history = ckpt.get('training_history', [])
-        self.historical_max_tile = ckpt.get('historical_max_tile', 0)
-        self.total_training_time = ckpt.get('total_training_time', 0.0)
-        print(f"  Loaded: {path}")
+    def _load_checkpoint(self, path: str):
+        ckpt = torch.load(path, map_location=DEVICE, weights_only=False)
+        self.model.load_state_dict(ckpt['model_state_dict'])
+        self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        self.best_avg_score = ckpt.get('best_avg_score', 0.0)
+        self.score_ema = ckpt.get('score_ema', None)
+        self.start_ep = ckpt.get('episode', 0) + 1
+        for item in ckpt.get('buffer', []):
+            self.buffer.buffer.append(item)
+        print(f"Resumed from episode {self.start_ep} "
+              f"(buffer={len(self.buffer)}, best={self.best_avg_score:.0f})")
+
+    def _play_one_game(self, temp: float) -> Tuple[List, float, int]:
+        """Play one complete game. Returns (trajectory, final_score, max_tile).
+
+        Does NOT write to the buffer — caller decides whether to store.
+        trajectory: list of (board, pi_target, score_before_move)
+        """
+        game = Game2048(self.config)
+        trajectory: List[Tuple[np.ndarray, np.ndarray, int]] = []
+
+        while not game.is_game_over():
+            board = game.get_state()
+            score = game.get_score()
+
+            pi_target, _ = run_mcts(
+                board, score, self.model, self.n_mcts, self.c,
+                self.config, self.n_chance
+            )
+
+            trajectory.append((board.copy(), pi_target, score))
+
+            # Apply temperature, then sample action
+            legal_moves = game.get_available_moves()
+            legal_mask = np.array([a in legal_moves for a in _ACTION_LIST],
+                                  dtype=np.float32)
+            if temp != 1.0 and temp > 0:
+                pi_t = pi_target ** (1.0 / temp)
+            else:
+                pi_t = pi_target.copy()
+            pi_t = pi_t * legal_mask
+            s = pi_t.sum()
+            pi_t = pi_t / s if s > 0 else legal_mask / legal_mask.sum()
+
+            # Greedy at very low temp
+            if temp < 0.05:
+                action_idx = int(np.argmax(pi_t))
+            else:
+                action_idx = int(np.random.choice(_NUM_ACTIONS, p=pi_t))
+            action = _ACTION_LIST[action_idx]
+
+            valid, _ = game.move(action)
+            if not valid:
+                game.move(legal_moves[0])
+
+        final_score = float(game.get_score())
+        max_tile = int(game.get_state().max())
+        return trajectory, final_score, max_tile
+
+    def _store_trajectory(self, trajectory: List, final_score: float):
+        """Compute MC returns for a trajectory and store in replay buffer."""
+        all_scores = [s for _, _, s in trajectory] + [final_score]
+        G = 0.0
+        for t in range(len(trajectory) - 1, -1, -1):
+            r_t = (all_scores[t + 1] - all_scores[t]) / _V_SCALE
+            G = r_t + self.gamma * G
+            v_target = max(-1.0, min(1.0, G))
+            board_t, pi_t, _ = trajectory[t]
+            self.buffer.store(board_t, pi_t, v_target)
+
+    def self_play_episode(self, ep: int, temp: float) -> Tuple[float, int]:
+        """Play n_games_per_ep games, store only the best-scoring one.
+
+        Improvements applied here:
+        - Best-of-N: run N games, keep the highest-scoring trajectory.
+          Prevents bad games from polluting the replay buffer.
+        - Buffer filter: skip storing if the best score is below
+          min_score_ratio * EMA of recent scores (with warmup period).
+          Breaks the negative feedback loop where bad games reinforce
+          a bad policy.
+
+        Returns (best_score, best_max_tile).
+        """
+        best_score = -1.0
+        best_traj: Optional[List] = None
+        best_tile = 0
+
+        for _ in range(self.n_games_per_ep):
+            traj, score, tile = self._play_one_game(temp)
+            if score > best_score:
+                best_score = score
+                best_traj  = traj
+                best_tile  = tile
+
+        # Update score EMA
+        if self.score_ema is None:
+            self.score_ema = best_score
+        else:
+            self.score_ema = 0.9 * self.score_ema + 0.1 * best_score
+
+        # Buffer filter: warmup for first warmup_ep episodes, then apply threshold
+        warmup = ep < self.warmup_ep
+        above_threshold = best_score >= self.score_ema * self.min_score_ratio
+        if warmup or above_threshold:
+            self._store_trajectory(best_traj, best_score)
+
+        return best_score, best_tile
+
+    def train_step(self) -> float:
+        if len(self.buffer) < self.batch_size:
+            return 0.0
+
+        self.model.train()
+        boards, pi_targets, v_targets = self.buffer.sample_batch(self.batch_size)
+
+        log_pi, v_pred = self.model(boards)
+
+        pi_loss = -(pi_targets * log_pi).sum(dim=1).mean()
+        v_loss  = F.mse_loss(v_pred, v_targets)
+        loss    = pi_loss + v_loss
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.optimizer.step()
+
+        return loss.item()
+
+    def evaluate(self, num_games: int = 5) -> Tuple[float, float, int]:
+        """Evaluate model greedily (no MCTS). Returns (avg_score, win_rate, max_tile)."""
+        scores = []
+        wins = 0
+        best_tile = 0
+
+        for _ in range(num_games):
+            game = Game2048(self.config)
+            while not game.is_game_over():
+                board = game.get_state()
+                pi = self.model.predict_pi(board)
+                legal_moves = game.get_available_moves()
+                legal_mask = np.array([a in legal_moves for a in _ACTION_LIST])
+                pi = pi * legal_mask
+                if pi.sum() > 0:
+                    action_idx = int(np.argmax(pi))
+                else:
+                    action_idx = _ACTION_LIST.index(legal_moves[0])
+                game.move(_ACTION_LIST[action_idx])
+
+            score = game.get_score()
+            tile  = int(game.get_state().max())
+            scores.append(score)
+            if tile >= 2048:
+                wins += 1
+            best_tile = max(best_tile, tile)
+
+        return sum(scores) / len(scores), wins / num_games, best_tile
+
+    def train(self):
+        print(f"AlphaZero Training: {self.n_ep} episodes, "
+              f"{self.n_mcts} MCTS sims/move, {self.n_chance} chance samples")
+        print(f"Best-of-{self.n_games_per_ep} self-play | "
+              f"Temp: {self.temp_start} -> {self.temp_final} over {self.temp_anneal_ep} eps | "
+              f"Buffer filter: {self.min_score_ratio:.0%} of EMA (warmup={self.warmup_ep} eps)")
+        print(f"Value targets: Monte Carlo returns (gamma={self.gamma})")
+        print(f"Device: cpu (GPU skipped — MCTS bottleneck is Python loop, not matrix math)")
+        if self.start_ep > 0:
+            print(f"Resuming from episode {self.start_ep}")
+        print("=" * 60)
+
+        best_score_ever = 0
+        best_tile_ever  = 0
+        recent_scores   = deque(maxlen=25)
+        total_wins = 0
+        total_games = 0
+
+        for ep in range(self.start_ep, self.n_ep):
+            ep_start = time.time()
+
+            # Temperature schedule: linear decay temp_start → temp_final
+            frac = min(1.0, ep / max(1, self.temp_anneal_ep))
+            temp = self.temp_start - frac * (self.temp_start - self.temp_final)
+
+            score, max_tile = self.self_play_episode(ep, temp)
+
+            best_score_ever = max(best_score_ever, score)
+            best_tile_ever  = max(best_tile_ever, max_tile)
+            recent_scores.append(score)
+            total_games += 1
+            if max_tile >= 2048:
+                total_wins += 1
+            avg_recent = sum(recent_scores) / len(recent_scores)
+
+            # Multiple gradient steps per episode
+            n_steps = min(max(1, len(self.buffer) // self.batch_size), 10)
+            losses = [self.train_step() for _ in range(n_steps)]
+            avg_loss = sum(losses) / len(losses) if losses else 0.0
+
+            ep_time = time.time() - ep_start
+            eta_min = ep_time * (self.n_ep - ep - 1) / 60
+
+            print(f"  Ep {ep+1:>4}/{self.n_ep} | Score: {score:>8.0f} | "
+                  f"Max: {max_tile:>5} | Loss: {avg_loss:.4f} | "
+                  f"Avg25: {avg_recent:>8.0f} | "
+                  f"Best: {best_score_ever:>8.0f} ({best_tile_ever}) | "
+                  f"T:{temp:.2f} | WinRate: {100*total_wins/total_games:.0f}% | "
+                  f"{ep_time:.1f}s (ETA: {eta_min:.0f}min)")
+
+            if (ep + 1) % self.ckpt_interval == 0:
+                self._save_checkpoint(ep)
+                print(f"  >>> Checkpoint saved (ep {ep+1})")
+
+            if (ep + 1) % self.eval_interval == 0:
+                avg_score, win_rate, best_tile = self.evaluate(self.eval_games)
+                print(f"  >>> Eval ({self.eval_games} games): "
+                      f"Avg={avg_score:.0f}, WinRate={win_rate:.0%}, "
+                      f"BestTile={best_tile}")
+
+                if avg_score > self.best_avg_score:
+                    self.best_avg_score = avg_score
+                    path = os.path.join(self.save_dir, "alphazero_best.pt")
+                    torch.save(self.model.state_dict(), path)
+                    print(f"  >>> New best! Saved to {path}")
+
+        self._save_checkpoint(self.n_ep - 1)
+        print(f"\nTraining complete.")
+        print(f"  Best self-play score: {best_score_ever:.0f} (tile: {best_tile_ever})")
+        print(f"  Self-play win rate: {100*total_wins/total_games:.1f}%")
+        print(f"  Best eval avg score: {self.best_avg_score:.0f}")
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  ALPHAZERO AGENT — BaseAgent wrapper for InteractionModule
+#  AGENT (framework integration)
 # ═══════════════════════════════════════════════════════════════════
 
 class AlphaZeroAgent(BaseAgent):
-    """Trained AlphaZero agent for evaluation via InteractionModule.
-
-    At inference time, runs MCTS with the trained network to select
-    moves. The number of MCTS simulations can be adjusted to trade
-    off compute vs performance.
+    """AlphaZero agent for 2048.
 
     Args:
-        model_path: Path to a saved AlphaZeroNetwork checkpoint.
-        grid_size: Board dimension.
-        num_simulations: MCTS iterations per move at evaluation time.
-            More sims = stronger play but slower inference.
-        c_puct: Exploration constant for MCTS.
-        deterministic: If True, always pick the most-visited action
-            (temperature → 0). If False, sample proportionally.
-        device: Torch device.
+        model_path: Path to trained .pt file.
+        n_mcts: MCTS simulations per move (0 = greedy policy only).
+        c: PUCT exploration constant.
+        n_chance: Chance node samples per MCTS expansion.
     """
 
+    agent_type = "alphazero"
+
     def __init__(self, model_path: Optional[str] = None,
-                 grid_size: int = 4,
-                 num_simulations: int = 100,
-                 c_puct: float = 1.5,
-                 deterministic: bool = True,
-                 device: Optional[str] = None):
-        super().__init__("AlphaZero")
-        self.agent_type = "alphazero"
-        self.grid_size = grid_size
-        self.num_simulations = num_simulations
-        self.c_puct = c_puct
-        self.deterministic = deterministic
+                 n_mcts: int = 100, c: float = 1.5, n_chance: int = 3):
+        mode = f"mcts={n_mcts}" if n_mcts > 0 else "greedy"
+        super().__init__(f"AlphaZero({mode})")
+        self.n_mcts = n_mcts
+        self.c = c
+        self.n_chance = n_chance
+        self.config = {"grid_size": 4}
 
-        if device:
-            self.device = device
-        elif torch.cuda.is_available():
-            self.device = 'cuda'
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            self.device = 'mps'
+        self.model = AlphaZeroNetwork()
+        if model_path and os.path.exists(model_path):
+            self.model.load_state_dict(
+                torch.load(model_path, map_location=DEVICE, weights_only=True)
+            )
+            print(f"Loaded AlphaZero model from {model_path}")
+        self.model.eval()
+
+    def choose_action(
+        self,
+        state: np.ndarray,
+        available_moves: List[Action],
+        game_context: Optional[Dict[str, Any]] = None,
+    ) -> Action:
+        if len(available_moves) == 1:
+            return available_moves[0]
+
+        board = state
+        score = game_context.get('score', 0) if game_context else 0
+        legal_mask = np.array([a in available_moves for a in _ACTION_LIST])
+
+        if self.n_mcts > 0:
+            pi, _ = run_mcts(board, score, self.model, self.n_mcts, self.c,
+                             self.config, self.n_chance)
         else:
-            self.device = 'cpu'
+            pi = self.model.predict_pi(board)
 
-        self.network = AlphaZeroNetwork(grid_size=grid_size).to(self.device)
-
-        if model_path:
-            ckpt = torch.load(model_path, map_location=self.device,
-                              weights_only=False)
-            if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
-                self.network.load_state_dict(ckpt['model_state_dict'])
-            else:
-                self.network.load_state_dict(ckpt)
-            print(f"AlphaZero: loaded {model_path}")
+        pi = pi * legal_mask
+        if pi.sum() > 0:
+            action_idx = int(np.argmax(pi))
         else:
-            print("AlphaZero: randomly initialized (untrained)")
+            return available_moves[0]
 
-        self.network.eval()
-        self.mcts = MCTS(
-            self.network, num_simulations, c_puct, self.device,
-        )
-
-    def choose_action(self, state: np.ndarray,
-                      available_moves: List[Action],
-                      game_context: Optional[Dict] = None) -> Action:
-        """Select an action using MCTS search.
-
-        Args:
-            state: Current board state (grid × grid numpy array).
-            available_moves: List of legal actions.
-            game_context: Dict from InteractionModule containing
-                'game' (for cloning) and other context.
-
-        Returns:
-            The chosen Action.
-        """
-        # Reconstruct a game for MCTS to clone internally
-        if game_context and 'game' in game_context:
-            game = game_context['game']
-        else:
-            score = game_context.get('score', 0) if game_context else 0
-            game = Game2048.from_state(state, score=score)
-
-        # Temperature: greedy at eval time
-        temperature = 0.01 if self.deterministic else 1.0
-
-        # Run MCTS
-        policy, _ = self.mcts.search(game, temperature=temperature)
-
-        # Select action
-        if self.deterministic:
-            # Mask illegal actions and pick best
-            masked = policy.copy()
-            legal_indices = {a.value for a in available_moves}
-            for i in range(NUM_ACTIONS):
-                if i not in legal_indices:
-                    masked[i] = -1.0
-            action_idx = np.argmax(masked)
-        else:
-            # Mask and renormalize
-            masked = policy.copy()
-            legal_indices = {a.value for a in available_moves}
-            for i in range(NUM_ACTIONS):
-                if i not in legal_indices:
-                    masked[i] = 0.0
-            total = masked.sum()
-            if total > 0:
-                masked /= total
-            else:
-                masked = np.ones(NUM_ACTIONS) / NUM_ACTIONS
-            action_idx = np.random.choice(NUM_ACTIONS, p=masked)
-
-        chosen = ACTIONS[action_idx]
-        if chosen not in available_moves:
-            chosen = available_moves[0]
-        return chosen
+        return _ACTION_LIST[action_idx]
 
     def get_params(self) -> Dict:
-        """Return agent parameters for logging."""
-        return {
-            'num_simulations': self.num_simulations,
-            'c_puct': self.c_puct,
-            'deterministic': self.deterministic,
-        }
+        return {'n_mcts': self.n_mcts, 'c': self.c, 'n_chance': self.n_chance}
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  CLI
+#  MAIN
 # ═══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser(description="AlphaZero 2048")
-    parser.add_argument("--mode", choices=["train", "eval", "full"],
-                        default="full")
-    parser.add_argument("--model", default="alphazero_model.pt")
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Path to checkpoint to resume training")
-    parser.add_argument("--config", default="config.json")
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--sims", type=int, default=100,
-                        help="MCTS simulations per move")
-    parser.add_argument("--games-per-epoch", type=int, default=25)
-    parser.add_argument("--train-steps", type=int, default=100,
-                        help="Gradient updates per epoch")
-    parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--res-blocks", type=int, default=5)
-    parser.add_argument("--channels", type=int, default=128)
-    parser.add_argument("--c-puct", type=float, default=1.5)
-    parser.add_argument("--eval-games", type=int, default=100)
-    parser.add_argument("--eval-sims", type=int, default=100,
-                        help="MCTS simulations per move during eval")
+    parser.add_argument("--mode", choices=["train", "eval"], default="train")
+    parser.add_argument("--n_ep", type=int, default=500)
+    parser.add_argument("--n_mcts", type=int, default=100)
+    parser.add_argument("--c", type=float, default=1.5)
+    parser.add_argument("--n_chance", type=int, default=1,
+                        help="Tile placements to sample per MCTS expansion (1=fast, 3=accurate)")
+    parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--buffer_size", type=int, default=50000)
+    parser.add_argument("--eval_interval", type=int, default=25)
+    parser.add_argument("--ckpt_interval", type=int, default=5)
+    parser.add_argument("--eval_games", type=int, default=5)
+    parser.add_argument("--model", type=str, default="checkpoints/alphazero_best.pt")
+    parser.add_argument("--num_games", type=int, default=10)
+    parser.add_argument("--n_games_per_ep", type=int, default=2,
+                        help="Games per episode (best-of-N stored)")
+    parser.add_argument("--temp_start", type=float, default=1.0,
+                        help="Starting temperature (use 0.5 with pretrained weights)")
+    parser.add_argument("--temp_anneal_ep", type=int, default=200,
+                        help="Episodes over which to decay temperature temp_start->temp_final")
+    parser.add_argument("--temp_final", type=float, default=0.1,
+                        help="Final temperature after annealing")
+    parser.add_argument("--warmup_ep", type=int, default=20,
+                        help="Episodes before buffer filter activates (use 0 with pretrained weights)")
+    parser.add_argument("--min_score_ratio", type=float, default=0.7,
+                        help="Min score as fraction of EMA to store in buffer")
+    parser.add_argument("--fresh", action="store_true",
+                        help="Ignore existing checkpoint and start fresh")
+    parser.add_argument("--pretrain_model", type=str, default=None,
+                        help="Path to pre-trained weights (used with --fresh)")
     args = parser.parse_args()
-
-    # Load config
-    try:
-        with open(args.config, "r") as f:
-            config = json.load(f)
-        print(f"Loaded {args.config} "
-              f"(grid: {config.get('grid_size', 4)}×"
-              f"{config.get('grid_size', 4)})")
-    except FileNotFoundError:
-        config = {"grid_size": 4}
-        print(f"{args.config} not found, using defaults (4×4)")
-
-    grid_size = config.get("grid_size", 4)
 
     if args.mode == "train":
         trainer = AlphaZeroTrainer(
-            config=config,
-            num_res_blocks=args.res_blocks,
-            channels=args.channels,
-            num_simulations=args.sims,
-            c_puct=args.c_puct,
+            n_ep=args.n_ep,
+            n_mcts=args.n_mcts,
+            c=args.c,
+            n_chance=args.n_chance,
             lr=args.lr,
             batch_size=args.batch_size,
-            epochs=args.epochs,
-            games_per_epoch=args.games_per_epoch,
-            train_steps_per_epoch=args.train_steps,
+            buffer_size=args.buffer_size,
+            eval_interval=args.eval_interval,
+            ckpt_interval=args.ckpt_interval,
+            eval_games=args.eval_games,
+            n_games_per_ep=args.n_games_per_ep,
+            temp_start=args.temp_start,
+            temp_anneal_ep=args.temp_anneal_ep,
+            temp_final=args.temp_final,
+            warmup_ep=args.warmup_ep,
+            min_score_ratio=args.min_score_ratio,
+            fresh=args.fresh,
+            pretrain_model=args.pretrain_model,
         )
-        if args.resume:
-            trainer.load_model(args.resume)
-        trainer.train(save_path=args.model)
+        trainer.train()
 
     elif args.mode == "eval":
         from framework.interaction import InteractionModule
         from framework.logger import RunLogger
-        logger = RunLogger()
+
         agent = AlphaZeroAgent(
             model_path=args.model,
-            grid_size=grid_size,
-            num_simulations=args.eval_sims,
-            deterministic=True,
+            n_mcts=args.n_mcts,
+            c=args.c,
+            n_chance=args.n_chance,
         )
-        module = InteractionModule(
-            config=config, agent=agent, logger=logger, verbose=True,
-        )
-        module.run(num_games=args.eval_games)
-        module.print_results()
-
-    elif args.mode == "full":
-        trainer = AlphaZeroTrainer(
-            config=config,
-            num_res_blocks=args.res_blocks,
-            channels=args.channels,
-            num_simulations=args.sims,
-            c_puct=args.c_puct,
-            lr=args.lr,
-            batch_size=args.batch_size,
-            epochs=args.epochs,
-            games_per_epoch=args.games_per_epoch,
-            train_steps_per_epoch=args.train_steps,
-        )
-        if args.resume:
-            trainer.load_model(args.resume)
-        trainer.train(save_path=args.model)
-
-        from framework.interaction import InteractionModule
-        from framework.logger import RunLogger
         logger = RunLogger()
-        agent = AlphaZeroAgent(
-            model_path=args.model,
-            grid_size=grid_size,
-            num_simulations=args.eval_sims,
-            deterministic=True,
-        )
+
         module = InteractionModule(
-            config=config, agent=agent, logger=logger, verbose=True,
+            config={"grid_size": 4},
+            agent=agent,
+            logger=logger,
+            verbose=True,
+            print_board=False,
+            num_workers=1,
         )
-        module.set_training_stats(
-            training_time_sec=trainer.total_training_time,
-            training_episodes=trainer.total_games,
-        )
-        module.run(num_games=args.eval_games)
+        module.run(num_games=args.num_games)
         module.print_results()
