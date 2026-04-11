@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from game.engine import Game2048, Game2048Visual, Action
 from framework.evaluation import REWARD_SEARCH
-from framework.interaction import RandomAgent
+from framework.interaction import RandomAgent  # noqa: F401 (kept for optional use)
 
 
 # ─── Agent configurations ─────────────────────────────────────────
@@ -49,12 +49,19 @@ def _build_agents():
     from agents.beam_search import BeamSearchAgent
     from agents.mcts import MCTSAgent
     from agents.expectimax_snake import ExpectimaxSnakeAgent
+    from agents.ppo2048 import PPOAgent
+
+    import os
+    ppo_ckpt = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'checkpoints', 'ppo_model.pt',
+    )
 
     return [
         BeamSearchAgent(beam_width=10, search_depth=15),
-        MCTSAgent(num_simulations=300, rollout_depth=15),
         ExpectimaxSnakeAgent(depth=2),
-        RandomAgent(),
+        MCTSAgent(num_simulations=300, rollout_depth=15),
+        PPOAgent(model_path=ppo_ckpt if os.path.exists(ppo_ckpt) else None),
     ]
 
 
