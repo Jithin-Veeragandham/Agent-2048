@@ -298,7 +298,7 @@ if __name__ == "__main__":
             'smooth': 1.3083,
         })
     )
-    logger = RunLogger()
+    logger = RunLogger(log_move_detail=True)
 
     module = InteractionModule(
         config=config,
@@ -306,7 +306,7 @@ if __name__ == "__main__":
         logger=logger,
         verbose=True,
         print_board=False,
-        num_workers=10,
+        num_workers=12,
     )
     module.run(num_games=100)
     module.print_results()

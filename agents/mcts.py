@@ -37,6 +37,8 @@ Usage::
 """
 
 import math
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import numpy as np
 from typing import Dict, List, Optional, Any
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -575,16 +577,13 @@ if __name__ == "__main__":
     from framework.logger import RunLogger
 
     config = {"grid_size": 4}
-    logger = RunLogger()
+    logger = RunLogger(log_move_detail=True)
 
     # ── Run classic MCTS ──────────────────────────────────────
-    print("=" * 60)
-    print("  CLASSIC MCTS (random rollouts)")
-    print("=" * 60)
     agent_classic = MCTSAgent(num_simulations=300, rollout_depth=15)
     module = InteractionModule(
         config=config, agent=agent_classic,
-        logger=logger, verbose=True, print_board=True, num_workers=10
+        logger=logger, verbose=True, print_board=False, num_workers=14
     )
     module.run(num_games=100)
     module.print_results()

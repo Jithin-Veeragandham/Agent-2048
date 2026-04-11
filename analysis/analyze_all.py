@@ -48,22 +48,37 @@ AGENTS = {
         "file": "expectimax_snake_runs.jsonl",
         "color": "#2ecc71",
         "short": "Expectimax\nSnake",
+        "run_id": "20746c9b-5ff",
     },
     "MCTS": {
         "file": "mcts_runs.jsonl",
         "color": "#9b59b6",
         "short": "MCTS",
+        "run_id": "17602ce1-5bc",
     },
     "PPO": {
-        "file": "ppo_runs.jsonl",
+        "file": "PPO_runs.jsonl",
         "color": "#e74c3c",
         "short": "PPO",
+        "run_id": "aee9fc06-16d",
     },
     "BeamSearch": {
         "file": "beam_search_runs.jsonl",
         "color": "#e67e22",
-        "short": "Beam",
-        "run_id": "4987840e-c5a",
+        "short": "Beam\nSearch",
+        "run_id": "d2b82f14-d47",
+    },
+    "NTuple": {
+        "file": "ntuple_agent_runs.jsonl",
+        "color": "#1abc9c",
+        "short": "NTuple",
+        "run_id": "ea38ab60-f3b",
+    },
+    "DQN": {
+        "file": "dqn_4x4_runs.jsonl",
+        "color": "#3498db",
+        "short": "DQN",
+        "run_id": "d6f6f6a5-963",
     },
 }
 
@@ -765,6 +780,237 @@ plt.tight_layout()
 plt.savefig(os.path.join(OUTPUT_DIR, "comparison_performance.png"), dpi=150, bbox_inches="tight")
 plt.close(fig5)
 print(f"Saved: comparison_performance.png")
+
+# ── Figure C6: Heuristic percentile box plots (grouped by component) ─
+FLIP_SIGN = {"monotonicity": -1, "corner_bonus": -1}
+
+fig6, axes6 = plt.subplots(2, 3, figsize=(16, 10))
+fig6.suptitle("Heuristic Component Distribution per Agent\n(avg per game, normalized to [0,1] per component)",
+              fontsize=13, fontweight="bold")
+
+for ax, comp, label in zip(axes6.flat, REWARD_COMPONENTS, REWARD_LABELS):
+    # Collect per-game avg values for each agent
+    agent_vals = []
+    for name in agent_names:
+        vals = []
+        for g in data[name]:
+            bd = g.get("avg_reward_breakdown", {})
+            if comp in bd:
+                v = bd[comp] * FLIP_SIGN.get(comp, 1)
+                vals.append(v)
+        agent_vals.append(vals)
+
+    # Normalize across all agents together
+    all_vals = [v for av in agent_vals for v in av]
+    vmin, vmax = min(all_vals), max(all_vals)
+    rng = vmax - vmin if vmax != vmin else 1
+    norm_vals = [[(v - vmin) / rng for v in av] for av in agent_vals]
+
+    bp = ax.boxplot(norm_vals, patch_artist=True, notch=False,
+                    medianprops=dict(color="black", linewidth=2),
+                    whiskerprops=dict(linewidth=1.2),
+                    capprops=dict(linewidth=1.2),
+                    flierprops=dict(marker="o", markersize=3, alpha=0.4))
+    for patch, color in zip(bp["boxes"], colors_list):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.75)
+
+    ax.set_xticks(range(1, len(agent_names) + 1))
+    ax.set_xticklabels([AGENTS[n]["short"].replace("\n", " ") for n in agent_names],
+                       fontsize=8, rotation=15, ha="right")
+    ax.set_ylabel("Normalized value")
+    ax.set_title(label)
+    ax.grid(axis="y", alpha=0.3)
+
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "comparison_heuristic_boxplots.png"), dpi=150, bbox_inches="tight")
+plt.close(fig6)
+print(f"Saved: comparison_heuristic_boxplots.png")
+
+# ── Figure C7: Cross-agent heuristic trajectories over game progress ──
+N_BINS = 100
+
+def interpolate_trajectory(vals, n_bins=N_BINS):
+    """Resample a trajectory of any length to n_bins evenly spaced points."""
+    n = len(vals)
+    if n < 2:
+        return None
+    x_old = np.linspace(0, 1, n)
+    x_new = np.linspace(0, 1, n_bins)
+    return np.interp(x_new, x_old, vals)
+
+fig7, axes7 = plt.subplots(2, 3, figsize=(16, 10))
+fig7.suptitle("Avg Rate of Change per Heuristic Over Game Progress\n(positive = gaining, negative = declining, zero = plateau)",
+              fontsize=13, fontweight="bold")
+
+x_pct = np.linspace(0, 100, N_BINS)
+x_mid = (x_pct[:-1] + x_pct[1:]) / 2   # midpoints for delta plot
+linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1))]
+SMOOTH_W = 8  # rolling average window for deltas
+
+def smooth(arr, w):
+    kernel = np.ones(w) / w
+    return np.convolve(arr, kernel, mode='same')
+
+for ax, comp, label in zip(axes7.flat, REWARD_COMPONENTS, REWARD_LABELS):
+    flip = FLIP_SIGN.get(comp, 1)
+    all_curves = {}
+
+    for name in agent_names:
+        curves = []
+        for g in data[name]:
+            moves = g.get("move_reward_breakdowns")
+            if not moves:
+                continue
+            vals = [m[comp] * flip for m in moves if comp in m]
+            if len(vals) < 2:
+                continue
+            interp = interpolate_trajectory(vals)
+            if interp is not None:
+                curves.append(interp)
+        if curves:
+            all_curves[name] = np.array(curves)
+
+    if not all_curves:
+        ax.set_title(label + " (no move data)")
+        continue
+
+    # Normalize across all agents so deltas are comparable
+    global_min = min(c.min() for c in all_curves.values())
+    global_max = max(c.max() for c in all_curves.values())
+    rng = global_max - global_min if global_max != global_min else 1
+
+    for name, color, ls in zip(agent_names, colors_list, linestyles):
+        if name not in all_curves:
+            continue
+        curves_norm = (all_curves[name] - global_min) / rng
+        # Delta: diff between consecutive bins, averaged across games
+        deltas = np.diff(curves_norm, axis=1)          # shape (n_games, N_BINS-1)
+        mean_delta = smooth(deltas.mean(axis=0), SMOOTH_W)
+        std_delta  = deltas.std(axis=0)
+        ax.plot(x_mid, mean_delta, color=color, linewidth=2, linestyle=ls,
+                label=AGENTS[name]["short"].replace("\n", " "))
+        ax.fill_between(x_mid,
+                        mean_delta - std_delta * 0.25,
+                        mean_delta + std_delta * 0.25,
+                        color=color, alpha=0.12)
+
+    ax.axhline(0, color="gray", linewidth=1, linestyle="--", alpha=0.6)
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("Game progress (%)")
+    ax.set_ylabel("Avg gain per step (normalized)")
+    ax.set_title(label)
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "comparison_heuristic_trajectories.png"), dpi=150, bbox_inches="tight")
+plt.close(fig7)
+print(f"Saved: comparison_heuristic_trajectories.png")
+
+
+# ── Figure C8: Win-advantage heatmap (one panel per agent) ────────────
+# Rows = heuristic components, Cols = 4 game phases
+# Cell colour = mean_norm(wins) - mean_norm(losses) at that phase
+# One presentation-ready figure; shared diverging colorbar.
+
+PHASES_C8    = [(0, 25), (25, 50), (50, 75), (75, 100)]
+PHASE_LABELS_C8 = ["Early\n0-25%", "Mid-Early\n25-50%",
+                   "Mid-Late\n50-75%", "Late\n75-100%"]
+
+def _phase_component_means(games, n_bins=100):
+    """Return (n_games, n_components, n_phases) normalized values."""
+    result = []
+    for g in games:
+        moves = g.get("move_reward_breakdowns")
+        if not moves:
+            continue
+        game_matrix = []
+        for comp in REWARD_COMPONENTS:
+            flip = -1 if FLIP_SIGN.get(comp) else 1
+            vals = np.array([m.get(comp, 0) * flip for m in moves], dtype=float)
+            lo, hi = vals.min(), vals.max()
+            normed = (vals - lo) / (hi - lo) if hi > lo else np.zeros_like(vals)
+            interp = interpolate_trajectory(normed, n_bins)
+            phase_vals = [interp[lo_p:hi_p].mean() for lo_p, hi_p in PHASES_C8]
+            game_matrix.append(phase_vals)
+        result.append(game_matrix)
+    return np.array(result)  # (n_games, n_components, n_phases)
+
+# Only agents that have move-level data
+agents_with_moves = [n for n in agent_names
+                     if any(g.get("move_reward_breakdowns") for g in data[n])]
+
+if agents_with_moves:
+    n_agents = len(agents_with_moves)
+    fig8, axes8 = plt.subplots(1, n_agents, figsize=(5 * n_agents, 7),
+                                constrained_layout=True)
+    if n_agents == 1:
+        axes8 = [axes8]
+
+    fig8.suptitle(
+        "Win Advantage by Heuristic Component & Game Phase\n"
+        "(green = higher in wins, red = higher in losses)",
+        fontsize=13, fontweight="bold",
+    )
+
+    vmax = 0.0
+    heat_data = {}
+    for name in agents_with_moves:
+        games_w = [g for g in data[name] if g.get("reached_2048")]
+        games_l = [g for g in data[name] if not g.get("reached_2048")]
+        if not games_w or not games_l:
+            continue
+        arr_w = _phase_component_means(games_w)   # (nW, 6, 4)
+        arr_l = _phase_component_means(games_l)   # (nL, 6, 4)
+        if arr_w.size == 0 or arr_l.size == 0:
+            continue
+        diff = arr_w.mean(axis=0) - arr_l.mean(axis=0)  # (6, 4)
+        heat_data[name] = diff
+        vmax = max(vmax, np.abs(diff).max())
+
+    if not heat_data:
+        print("  [SKIP] Figure C8: no agents with win/loss move data")
+    else:
+        vmax = max(vmax, 0.05)  # floor so colorbar isn't empty
+        im8 = None
+        for ax, name in zip(axes8, agents_with_moves):
+            if name not in heat_data:
+                ax.set_visible(False)
+                continue
+            diff = heat_data[name]
+            im8 = ax.imshow(diff, aspect="auto", cmap="RdYlGn",
+                            vmin=-vmax, vmax=vmax, interpolation="nearest")
+
+            # Annotate cells
+            for r in range(len(REWARD_COMPONENTS)):
+                for c in range(len(PHASES_C8)):
+                    val = diff[r, c]
+                    color = "black" if abs(val) < vmax * 0.6 else "white"
+                    ax.text(c, r, f"{val:+.2f}", ha="center", va="center",
+                            fontsize=9, fontweight="bold", color=color)
+
+            short = AGENTS[name]["short"].replace("\n", " ")
+            n_w = sum(1 for g in data[name] if g.get("reached_2048"))
+            n_l = sum(1 for g in data[name] if not g.get("reached_2048"))
+            ax.set_title(f"{short}\n(W={n_w}, L={n_l})",
+                         fontsize=11, fontweight="bold",
+                         color=AGENTS[name]["color"])
+            ax.set_xticks(range(len(PHASES_C8)))
+            ax.set_xticklabels(PHASE_LABELS_C8, fontsize=8)
+            ax.set_yticks(range(len(REWARD_COMPONENTS)))
+            ax.set_yticklabels(REWARD_LABELS, fontsize=9)
+            ax.set_xlabel("Game Phase", fontsize=9)
+
+        if im8 is not None:
+            cbar = fig8.colorbar(im8, ax=axes8, shrink=0.7, pad=0.02)
+            cbar.set_label("Win mean − Loss mean (normalised)", fontsize=9)
+
+        plt.savefig(os.path.join(OUTPUT_DIR, "comparison_win_advantage_heatmap.png"),
+                    dpi=150, bbox_inches="tight")
+        plt.close(fig8)
+        print(f"Saved: comparison_win_advantage_heatmap.png")
+
 
 print(f"\nAll outputs saved to {OUTPUT_DIR}/")
 print(f"  Per-agent subfolders: {', '.join(agent_names)}")
