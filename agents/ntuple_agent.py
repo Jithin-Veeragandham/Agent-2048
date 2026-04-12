@@ -1,15 +1,15 @@
-﻿"""
+﻿# coding: utf-8
+"""
 agents/ntuple_agent.py
-================
-
+======================
 Wraps the tabular QAgent (n-tuple TD learning) as a BaseAgent so it
 plugs directly into the Agent-2048 InteractionModule and RunLogger.
 
 Architecture
 ------------
 N-tuple TD(0) learning with a linear value function over hand-crafted
-board features (rows, columns, 3x3 squares). The agent uses a greedy
-policy ΓÇö no exploration at inference time. Action selection works by
+board features (rows, columns, 2x2 squares). The agent uses a greedy
+policy -- no exploration at inference time. Action selection works by
 trying all 4 legal moves, scoring each resulting board state with the
 learned weight table, and picking the highest-scoring one.
 
@@ -24,9 +24,9 @@ Usage
     from framework.interaction import InteractionModule
     from framework.logger import RunLogger
 
-    agent  = NTupleAgent(agent_path="game2048/local_storage/a/my_agent.pkl",
-                        weights_path="game2048/local_storage/weights/my_agent.pkl")
-    logger = RunLogger()
+    agent  = NTupleAgent(agent_path="checkpoints/ntuple_best_agent.pkl",
+                         weights_path="checkpoints/ntuple_best_agent_weights.pkl")
+    logger = RunLogger(log_move_detail=True)
     module = InteractionModule(
         config={"grid_size": 4},
         agent=agent,
@@ -38,9 +38,10 @@ Usage
 
 Quick eval from command line
 ----------------------------
-    python agents/ntuple_agent.py --agent game2048/local_storage/a/my_agent.pkl \\
-                            --weights game2048/local_storage/weights/my_agent.pkl \\
-                            --games 100
+    python agents/ntuple_agent.py \
+        --agent checkpoints/ntuple_best_agent.pkl \
+        --weights checkpoints/ntuple_best_agent_weights.pkl \
+        --games 100
 """
 
 import os
@@ -58,7 +59,10 @@ if _REPO_ROOT not in sys.path:
 from game import Action
 from agents.base import BaseAgent
 
-# Action mapping:
+# ================================================================
+#  ACTION MAPPING
+# ================================================================
+
 # QAgent direction: 0=left, 1=up, 2=right, 3=down
 # Agent-2048 Action enum: UP=0, DOWN=1, LEFT=2, RIGHT=3
 _DIR_TO_ACTION = [Action.LEFT, Action.UP, Action.RIGHT, Action.DOWN]
@@ -70,8 +74,12 @@ _ACTION_TO_DIR = {
 }
 
 
+# ================================================================
+#  BOARD CONVERSION
+# ================================================================
+
 def _actual_to_log2(board: np.ndarray) -> np.ndarray:
-    """Convert Agent-2048 board (actual values) ΓåÆ QAgent board (log2 values).
+    """Convert Agent-2048 board (actual tile values) to QAgent format (log2).
 
     Agent-2048: 0=empty, 2=tile-2, 4=tile-4, ...
     QAgent:     0=empty, 1=tile-2, 2=tile-4, ...
@@ -82,11 +90,16 @@ def _actual_to_log2(board: np.ndarray) -> np.ndarray:
     return result
 
 
+# ================================================================
+#  NTUPLE AGENT
+# ================================================================
+
 class NTupleAgent(BaseAgent):
     """Tabular QAgent (n-tuple TD learning) wrapped as a BaseAgent.
 
-    Loads a trained checkpoint from local_storage and runs greedy
-    inference using the learned value function.
+    Loads a trained checkpoint and runs greedy inference using the
+    learned value function. No neural network -- value is computed as
+    a sum of lookup table entries indexed by tile pattern features.
 
     Args:
         agent_path:   Path to agent .pkl (structure without weights).
@@ -106,31 +119,29 @@ class NTupleAgent(BaseAgent):
         self.agent_path   = agent_path
         self.weights_path = weights_path
 
-        # The pickle was saved from the 2048/ directory which contains
+        # The pickle was saved from the abachurin/2048 repo which contains
         # the game2048 package. Walk up from agent_path to find the directory
-        # that contains the game2048 package and add it to sys.path.
-        # agent_path: .../2048/game2048/local_storage/a/best_agent.pkl
-        # We need:    .../2048/
+        # that contains game2048/ and add it to sys.path so pickle can load.
         _p = os.path.abspath(agent_path)
-        for _ in range(6):  # walk up at most 6 levels
+        for _ in range(6):
             _p = os.path.dirname(_p)
             if os.path.isdir(os.path.join(_p, 'game2048')):
                 if _p not in sys.path:
                     sys.path.insert(0, _p)
                 break
 
-        # Load agent and weights
+        # Load agent shell and weights from separate pkl files
         with open(agent_path, "rb") as f:
             self._agent = pickle.load(f)
         with open(weights_path, "rb") as f:
             self._agent.weights = pickle.load(f)
         self._agent.np_to_list()
 
-        self._n            = self._agent.n
-        self._num_feat     = self._agent.num_feat
-        self._features     = self._agent.features
-        self._trained_eps  = self._agent.step
-        self._top_score    = self._agent.top_score
+        self._n           = self._agent.n
+        self._num_feat    = self._agent.num_feat
+        self._features    = self._agent.features
+        self._trained_eps = self._agent.step
+        self._top_score   = self._agent.top_score
 
         print(
             f"NTupleAgent: loaded '{agent_path}' | "
@@ -140,7 +151,7 @@ class NTupleAgent(BaseAgent):
         )
 
     def _evaluate(self, log2_board: np.ndarray) -> float:
-        """Score a board state using the learned weight table.
+        """Score a board state using the learned weight lookup tables.
 
         Args:
             log2_board: (4,4) int32 array in log2 representation.
@@ -154,13 +165,19 @@ class NTupleAgent(BaseAgent):
         )
 
     def _pre_move(self, log2_board: np.ndarray, direction: int):
-        """Apply a move to a log2 board without modifying it.
+        """Simulate a move on a log2 board without modifying it.
 
-        Uses the QAgent's own lookup-table based move logic which
-        operates on log2 values. Returns (new_board, changed).
+        Uses the QAgent's lookup-table move logic (operates on log2 values).
+
+        Args:
+            log2_board: (4,4) int32 board in log2 representation.
+            direction:  0=left, 1=up, 2=right, 3=down
+
+        Returns:
+            (new_board, changed): new board state and whether it changed.
         """
         from game2048.game_logic import Game
-        _g = Game.__new__(Game)   # create instance without __init__
+        _g = Game.__new__(Game)
         new_board, _, changed = _g.pre_move(log2_board, 0, direction)
         return new_board, changed
 
@@ -172,25 +189,23 @@ class NTupleAgent(BaseAgent):
     ) -> Action:
         """Pick the action whose resulting board has the highest estimated value.
 
-        Converts the Agent-2048 board (actual tile values) to log2
-        representation, tries every legal move using the QAgent's move
-        table, scores each result, and returns the best action.
+        Converts the board to log2 format, tries every legal move,
+        scores each result with the weight tables, returns the best action.
 
         Args:
             state:           (4,4) numpy array with actual tile values.
             available_moves: Non-empty list of valid Action values.
-            game_context:    Unused.
+            game_context:    Unused (n-tuple is stateless at inference).
 
         Returns:
             Action: the chosen move direction.
         """
-        log2_board = _actual_to_log2(state)
-
+        log2_board  = _actual_to_log2(state)
         best_action = available_moves[0]
         best_value  = -np.inf
 
         for action in available_moves:
-            direction        = _ACTION_TO_DIR[action]
+            direction          = _ACTION_TO_DIR[action]
             new_board, changed = self._pre_move(log2_board, direction)
             if not changed:
                 continue
@@ -212,19 +227,19 @@ class NTupleAgent(BaseAgent):
         }
 
 
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
-#  CLI ΓÇö run eval and write log files
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ================================================================
+#  CLI -- run eval and write log files
+# ================================================================
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Evaluate QAgent and write log files in PPO-compatible format.")
+        description="Evaluate NTuple agent and write log files.")
     parser.add_argument("--agent",   required=True,
-                        help="Path to agent .pkl (e.g. game2048/local_storage/a/my_agent.pkl)")
+                        help="Path to agent .pkl")
     parser.add_argument("--weights", required=True,
-                        help="Path to weights .pkl (e.g. game2048/local_storage/weights/my_agent.pkl)")
+                        help="Path to weights .pkl")
     parser.add_argument("--games",   type=int, default=100,
                         help="Number of evaluation games")
     parser.add_argument("--config",  default="config.json",
@@ -238,7 +253,7 @@ if __name__ == "__main__":
     from framework.interaction import InteractionModule
     from framework.logger import RunLogger
 
-    # Load game config
+    # Load game config (QAgent is always 4x4)
     if os.path.exists(args.config):
         with open(args.config) as f:
             config = json.load(f)
@@ -249,7 +264,7 @@ if __name__ == "__main__":
             "initial_tiles": 2,
             "random_seed": None,
         }
-    config["grid_size"] = 4   # QAgent is 4├ù4 only
+    config["grid_size"] = 4
 
     agent = NTupleAgent(
         agent_path=args.agent,
@@ -258,7 +273,9 @@ if __name__ == "__main__":
     )
 
     os.makedirs(args.log_dir, exist_ok=True)
-    logger = RunLogger(log_dir=args.log_dir)
+
+    # log_move_detail=True required for per-move reward breakdown metrics
+    logger = RunLogger(log_dir=args.log_dir, log_move_detail=True)
 
     module = InteractionModule(
         config=config,
@@ -272,7 +289,7 @@ if __name__ == "__main__":
     results_path = os.path.join(args.log_dir, "ntuple_agent_eval_results.json")
     module.save_results(results_path)
 
-    # ΓöÇΓöÇ Convert JSONL ΓåÆ wrapped JSON (matches PPO/DQN log format) ΓöÇ
+    # Convert JSONL -> wrapped JSON (matches PPO/DQN log format)
     jsonl_path   = os.path.join(args.log_dir, "ntuple_agent_runs.jsonl")
     wrapped_path = os.path.join(args.log_dir, "ntuple_agent_runs.json")
 
