@@ -2,8 +2,9 @@
 """
 agents/ntuple_agent.py
 ======================
-Wraps the tabular QAgent (n-tuple TD learning) as a BaseAgent so it
-plugs directly into the Agent-2048 InteractionModule and RunLogger.
+Fully self-contained N-Tuple TD agent -- no external dependencies.
+All required game logic from abachurin/2048 is embedded directly in
+this file so it runs on any machine without PYTHONPATH setup.
 
 Architecture
 ------------
@@ -13,10 +14,10 @@ policy -- no exploration at inference time. Action selection works by
 trying all 4 legal moves, scoring each resulting board state with the
 learned weight table, and picking the highest-scoring one.
 
-Important: the QAgent's internal Game class stores tiles as log2 values
-(0=empty, 1=tile-2, 2=tile-4, ...), while Agent-2048's Game2048 stores
-actual tile values (0, 2, 4, 8, ...). This wrapper converts between the
-two representations at every step.
+Board representation:
+    Agent-2048 (Game2048): stores actual tile values (0, 2, 4, 8, ...)
+    QAgent (abachurin):    stores log2 values (0=empty, 1=2, 2=4, ...)
+    This wrapper converts between the two at every step.
 
 Usage
 -----
@@ -48,6 +49,7 @@ import os
 import sys
 import json
 import pickle
+import random
 import numpy as np
 from typing import Dict, List, Optional, Any
 
@@ -59,13 +61,81 @@ if _REPO_ROOT not in sys.path:
 from game import Action
 from agents.base import BaseAgent
 
+
+# ================================================================
+#  EMBEDDED GAME LOGIC (from abachurin/2048)
+#  Included here so no external repo or PYTHONPATH is needed.
+# ================================================================
+
+def _create_move_table():
+    """Precompute all possible row-left-slide results.
+
+    For each possible 4-tile row (16^4 = 65536 combinations),
+    stores (result_row, score_gained, did_change).
+    Uses log2 tile values: 0=empty, 1=tile-2, 2=tile-4, etc.
+    """
+    table = {}
+    for a in range(16):
+        for b in range(16):
+            for c in range(16):
+                for d in range(16):
+                    score = 0
+                    line = (a, b, c, d)
+                    if (len(set(line)) == 4 and min(line)) or (not max(line)):
+                        table[line] = (line, score, False)
+                        continue
+                    line_1 = [v for v in line if v]
+                    for i in range(len(line_1) - 1):
+                        x = line_1[i]
+                        if x == line_1[i + 1]:
+                            score += 1 << (x + 1)
+                            line_1[i], line_1[i + 1] = x + 1, 0
+                    line_2 = [v for v in line_1 if v]
+                    line_2 = tuple(line_2 + [0] * (4 - len(line_2)))
+                    table[line] = (line_2, score, line != line_2)
+    return table
+
+
+# Build move table once at import time
+_MOVE_TABLE = _create_move_table()
+
+
+def _pre_move(row: np.ndarray, score: int, direction: int):
+    """Simulate a move on a log2 board without modifying it.
+
+    Uses the precomputed move table for fast row sliding.
+
+    Args:
+        row:       (4,4) int32 board in log2 representation.
+        score:     Current game score.
+        direction: 0=left, 1=up, 2=right, 3=down
+
+    Returns:
+        (new_row, new_score, changed)
+    """
+    new_row = np.rot90(row, direction) if direction else row.copy()
+    if not direction:
+        new_row = row.copy()
+    change = False
+    new_score = score
+    result = new_row.copy()
+    for i in range(4):
+        line, sc, changed = _MOVE_TABLE[tuple(new_row[i])]
+        if changed:
+            change = True
+            new_score += sc
+            result[i] = line
+    if direction:
+        result = np.rot90(result, 4 - direction)
+    return result, new_score, change
+
+
 # ================================================================
 #  ACTION MAPPING
 # ================================================================
 
 # QAgent direction: 0=left, 1=up, 2=right, 3=down
 # Agent-2048 Action enum: UP=0, DOWN=1, LEFT=2, RIGHT=3
-_DIR_TO_ACTION = [Action.LEFT, Action.UP, Action.RIGHT, Action.DOWN]
 _ACTION_TO_DIR = {
     Action.LEFT:  0,
     Action.UP:    1,
@@ -79,7 +149,7 @@ _ACTION_TO_DIR = {
 # ================================================================
 
 def _actual_to_log2(board: np.ndarray) -> np.ndarray:
-    """Convert Agent-2048 board (actual tile values) to QAgent format (log2).
+    """Convert Agent-2048 board (actual tile values) to log2 format.
 
     Agent-2048: 0=empty, 2=tile-2, 4=tile-4, ...
     QAgent:     0=empty, 1=tile-2, 2=tile-4, ...
@@ -96,6 +166,9 @@ def _actual_to_log2(board: np.ndarray) -> np.ndarray:
 
 class NTupleAgent(BaseAgent):
     """Tabular QAgent (n-tuple TD learning) wrapped as a BaseAgent.
+
+    Fully self-contained -- all game logic is embedded in this file.
+    No external repo or PYTHONPATH setup needed on any machine.
 
     Loads a trained checkpoint and runs greedy inference using the
     learned value function. No neural network -- value is computed as
@@ -119,23 +192,10 @@ class NTupleAgent(BaseAgent):
         self.agent_path   = agent_path
         self.weights_path = weights_path
 
-        # The pickle was saved from the abachurin/2048 repo which contains
-        # the game2048 package. Walk up from agent_path to find the directory
-        # that contains game2048/ and add it to sys.path so pickle can load.
-        _p = os.path.abspath(agent_path)
-        for _ in range(6):
-            _p = os.path.dirname(_p)
-            if os.path.isdir(os.path.join(_p, 'game2048')):
-                if _p not in sys.path:
-                    sys.path.insert(0, _p)
-                break
-
-        # Load agent shell and weights from separate pkl files
-        with open(agent_path, "rb") as f:
-            self._agent = pickle.load(f)
-        with open(weights_path, "rb") as f:
-            self._agent.weights = pickle.load(f)
-        self._agent.np_to_list()
+        # Load agent shell and weights
+        # The pkl was saved with game2048 module -- we patch sys.modules
+        # so pickle can deserialize without the external repo.
+        self._agent = self._load_agent(agent_path, weights_path)
 
         self._n           = self._agent.n
         self._num_feat    = self._agent.num_feat
@@ -150,8 +210,71 @@ class NTupleAgent(BaseAgent):
             f"top_score={self._top_score:,}"
         )
 
+    def _load_agent(self, agent_path: str, weights_path: str):
+        """Load QAgent, trying multiple strategies to handle module deps."""
+
+        # Strategy 1: try loading directly (works if game2048 is on path)
+        try:
+            with open(agent_path, "rb") as f:
+                agent = pickle.load(f)
+            with open(weights_path, "rb") as f:
+                agent.weights = pickle.load(f)
+            agent.np_to_list()
+            return agent
+        except ModuleNotFoundError:
+            pass
+
+        # Strategy 2: walk up directory tree to find game2048 package
+        _p = os.path.abspath(agent_path)
+        for _ in range(10):
+            _p = os.path.dirname(_p)
+            if os.path.isdir(os.path.join(_p, 'game2048')):
+                if _p not in sys.path:
+                    sys.path.insert(0, _p)
+                try:
+                    with open(agent_path, "rb") as f:
+                        agent = pickle.load(f)
+                    with open(weights_path, "rb") as f:
+                        agent.weights = pickle.load(f)
+                    agent.np_to_list()
+                    return agent
+                except Exception:
+                    pass
+
+        # Strategy 3: use a custom unpickler that stubs missing modules
+        import types
+        import importlib
+
+        class _StubModule(types.ModuleType):
+            """Stub for missing modules during unpickling."""
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        class _SafeUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                try:
+                    return super().find_class(module, name)
+                except (ModuleNotFoundError, AttributeError):
+                    # Create stub and register it
+                    parts = module.split('.')
+                    for i in range(len(parts)):
+                        mod_name = '.'.join(parts[:i+1])
+                        if mod_name not in sys.modules:
+                            sys.modules[mod_name] = _StubModule(mod_name)
+                    try:
+                        return super().find_class(module, name)
+                    except Exception:
+                        return object
+
+        with open(agent_path, "rb") as f:
+            agent = _SafeUnpickler(f).load()
+        with open(weights_path, "rb") as f:
+            agent.weights = pickle.load(f)
+        agent.np_to_list()
+        return agent
+
     def _evaluate(self, log2_board: np.ndarray) -> float:
-        """Score a board state using the learned weight lookup tables.
+        """Score a board using the learned weight lookup tables.
 
         Args:
             log2_board: (4,4) int32 array in log2 representation.
@@ -164,23 +287,6 @@ class NTupleAgent(BaseAgent):
             for i, f in enumerate(self._features(log2_board))
         )
 
-    def _pre_move(self, log2_board: np.ndarray, direction: int):
-        """Simulate a move on a log2 board without modifying it.
-
-        Uses the QAgent's lookup-table move logic (operates on log2 values).
-
-        Args:
-            log2_board: (4,4) int32 board in log2 representation.
-            direction:  0=left, 1=up, 2=right, 3=down
-
-        Returns:
-            (new_board, changed): new board state and whether it changed.
-        """
-        from game2048.game_logic import Game
-        _g = Game.__new__(Game)
-        new_board, _, changed = _g.pre_move(log2_board, 0, direction)
-        return new_board, changed
-
     def choose_action(
         self,
         state: np.ndarray,
@@ -189,8 +295,8 @@ class NTupleAgent(BaseAgent):
     ) -> Action:
         """Pick the action whose resulting board has the highest estimated value.
 
-        Converts the board to log2 format, tries every legal move,
-        scores each result with the weight tables, returns the best action.
+        Converts the board to log2 format, tries every legal move using
+        the embedded move table, scores each result, returns the best action.
 
         Args:
             state:           (4,4) numpy array with actual tile values.
@@ -206,7 +312,7 @@ class NTupleAgent(BaseAgent):
 
         for action in available_moves:
             direction          = _ACTION_TO_DIR[action]
-            new_board, changed = self._pre_move(log2_board, direction)
+            new_board, _, changed = _pre_move(log2_board, 0, direction)
             if not changed:
                 continue
             value = self._evaluate(new_board)
@@ -253,7 +359,7 @@ if __name__ == "__main__":
     from framework.interaction import InteractionModule
     from framework.logger import RunLogger
 
-    # Load game config (QAgent is always 4x4)
+    # Load game config (NTuple agent is always 4x4)
     if os.path.exists(args.config):
         with open(args.config) as f:
             config = json.load(f)

@@ -1,21 +1,21 @@
 {
   "agent": "Agent",
   "num_episodes": 100,
-  "win_rate_2048": 96.0,
-  "win_rate_4096": 83.0,
-  "win_rate_8192": 29.0,
-  "avg_merge_score": 82884.2,
-  "avg_moves_per_game": 3682.94,
+  "win_rate_2048": 95.0,
+  "win_rate_4096": 79.0,
+  "win_rate_8192": 23.0,
+  "avg_merge_score": 80056.12,
+  "avg_moves_per_game": 3583.0,
   "highest_tile_distribution": {
-    "256": 1.0,
-    "1024": 3.0,
-    "2048": 13.0,
-    "4096": 54.0,
-    "8192": 29.0
+    "512": 1.0,
+    "1024": 4.0,
+    "2048": 16.0,
+    "4096": 56.0,
+    "8192": 23.0
   },
-  "avg_inference_ms": 0.391,
-  "p95_inference_ms": 1.016,
+  "avg_inference_ms": 0.392,
+  "p95_inference_ms": 1.019,
   "training_time_sec": 0.0,
   "training_episodes": 0,
-  "score_per_compute_sec": 575.85
+  "score_per_compute_sec": 569.44
 }
