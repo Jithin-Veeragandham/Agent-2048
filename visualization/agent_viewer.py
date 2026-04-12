@@ -1,3 +1,4 @@
+# coding: utf-8
 """
 agent_viewer.py
 ===============
@@ -12,6 +13,7 @@ Usage::
     python visualization/agent_viewer.py --agent beam_search --width 10 --depth 15
     python visualization/agent_viewer.py --agent mcts --simulations 100 --delay 500
     python visualization/agent_viewer.py --agent expectimax --search-depth 3
+    python visualization/agent_viewer.py --agent ntuple
     python visualization/agent_viewer.py --agent random
 
 Controls:
@@ -42,6 +44,7 @@ AGENT_REGISTRY = {
     'mcts':            ('agents.mcts',              'MCTSAgent'),
     'expectimax':      ('agents.expectimax',        'ExpectimaxAgent'),
     'expectimax_snake':('agents.expectimax_snake',  'ExpectimaxSnakeAgent'),
+    'ntuple':          ('agents.ntuple_agent',      'NTupleAgent'),
     'random':          None,   # built-in, no import needed
 }
 
@@ -56,7 +59,7 @@ def run_agent_visual(agent, config=None, step_delay_ms=300):
 
     Args:
         agent:          Any BaseAgent instance.
-        config:         Game config dict. Defaults to standard 4×4 settings.
+        config:         Game config dict. Defaults to standard 4x4 settings.
         step_delay_ms:  Milliseconds to wait between agent moves.
     """
     if config is None:
@@ -150,6 +153,11 @@ def _build_agent(args):
         return cls(num_simulations=args.simulations)
     elif args.agent in ('expectimax', 'expectimax_snake'):
         return cls(depth=args.search_depth)
+    elif args.agent == 'ntuple':
+        return cls(
+            agent_path=args.ntuple_agent,
+            weights_path=args.ntuple_weights,
+        )
     else:
         return cls()
 
@@ -184,13 +192,21 @@ if __name__ == '__main__':
     parser.add_argument('--search-depth', dest='search_depth', type=int, default=2,
                         help='[expectimax / expectimax_snake] Search depth.')
 
+    # NTuple
+    parser.add_argument('--ntuple-agent',   dest='ntuple_agent',
+                        default='checkpoints/ntuple_best_agent.pkl',
+                        help='[ntuple] Path to agent .pkl')
+    parser.add_argument('--ntuple-weights', dest='ntuple_weights',
+                        default='checkpoints/ntuple_best_agent_weights.pkl',
+                        help='[ntuple] Path to weights .pkl')
+
     args = parser.parse_args()
 
     config = load_config(args.config or 'config.json')
     agent  = _build_agent(args)
 
     print(f"Agent: {agent.name}  |  Delay: {args.delay} ms  |  "
-          f"Grid: {config.get('grid_size', 4)}×{config.get('grid_size', 4)}")
+          f"Grid: {config.get('grid_size', 4)}x{config.get('grid_size', 4)}")
     print("Controls: SPACE=pause  R=reset  Q=quit\n")
 
     run_agent_visual(agent, config, step_delay_ms=args.delay)
