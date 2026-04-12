@@ -4,18 +4,19 @@
   "win_rate_2048": 3.0,
   "win_rate_4096": 0.0,
   "win_rate_8192": 0.0,
-  "avg_merge_score": 10588.4,
-  "avg_moves_per_game": 659.33,
+  "avg_merge_score": 10278.48,
+  "avg_moves_per_game": 644.51,
   "highest_tile_distribution": {
+    "64": 1.0,
     "128": 3.0,
-    "256": 8.0,
-    "512": 44.0,
-    "1024": 42.0,
+    "256": 11.0,
+    "512": 43.0,
+    "1024": 39.0,
     "2048": 3.0
   },
-  "avg_inference_ms": 2.346,
-  "p95_inference_ms": 5.0,
+  "avg_inference_ms": 2.672,
+  "p95_inference_ms": 5.036,
   "training_time_sec": 0.0,
   "training_episodes": 0,
-  "score_per_compute_sec": 68.45
+  "score_per_compute_sec": 59.69
 }

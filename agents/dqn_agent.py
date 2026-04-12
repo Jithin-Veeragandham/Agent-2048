@@ -417,7 +417,9 @@ if __name__ == "__main__":
         results_filename = "dqn_6x6_eval_results.json"
 
     os.makedirs(args.log_dir, exist_ok=True)
-    logger = RunLogger(log_dir=args.log_dir)
+
+    # log_move_detail=True required for per-move reward breakdown metrics
+    logger = RunLogger(log_dir=args.log_dir, log_move_detail=True)
 
     module = InteractionModule(
         config=config,

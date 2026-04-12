@@ -58,14 +58,14 @@ AGENTS = {
         "file": "ntuple_agent_runs.jsonl",
         "color": "#1abc9c",
         "short": "NTuple",
-        "run_id": "ea38ab60-f3b",
-    },
-    "DQN": {
-        "file": "dqn_4x4_runs.jsonl",
-        "color": "#3498db",
-        "short": "DQN",
-        "run_id": "d6f6f6a5-963",
-    },
+        "run_id": "eeb816ca-32d",
+    }, 
+    #"DQN": {
+   #     "file": "dqn_4x4_runs.jsonl",
+    #    "color": "#3498db",
+     #   "short": "DQN",
+      #  "run_id": "d6f6f6a5-963",
+    #},
 }
 
 REWARD_COMPONENTS = [

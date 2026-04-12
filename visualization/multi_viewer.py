@@ -1,3 +1,4 @@
+# coding: utf-8
 """
 multi_viewer.py
 ===============
@@ -12,18 +13,18 @@ Usage::
 
     python visualization/multi_viewer.py
 
-Layout (2×2 default):
-    ┌─────────────────────┬─────────────────────┐
-    │  BeamSearch(w=10)   │      MCTS(n=200)    │
-    │  Score: 18,432      │  Score: 12,048      │
-    │  47 moves/sec       │  3 moves/sec        │
-    │  [board]            │  [board]            │
-    ├─────────────────────┼─────────────────────┤
-    │  Expectimax(d=3)    │      Random         │
-    │  Score: 1,024       │  Score: 980         │
-    │  12 moves/sec       │  890 moves/sec      │
-    │  [board]            │  [board]            │
-    └─────────────────────┴─────────────────────┘
+Layout (2x3):
+    +---------------------+---------------------+---------------------+
+    |  BeamSearch(w=10)   |  ExpectimaxSnake    |    MCTS(n=300)      |
+    |  Score: 18,432      |  Score: 63,931      |  Score: 12,048      |
+    |  47 moves/sec       |  12 moves/sec       |  3 moves/sec        |
+    |  [board]            |  [board]            |  [board]            |
+    +---------------------+---------------------+---------------------+
+    |  PPO                |  NTuple             |  Random             |
+    |  Score: 37,937      |  Score: 80,921      |  Score: 980         |
+    |  890 moves/sec      |  1200 moves/sec     |  890 moves/sec      |
+    |  [board]            |  [board]            |  [board]            |
+    +---------------------+---------------------+---------------------+
 """
 
 import os
@@ -40,7 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from game.engine import Game2048, Game2048Visual, Action
 from framework.evaluation import REWARD_SEARCH
-from framework.interaction import RandomAgent  # noqa: F401 (kept for optional use)
+from framework.interaction import RandomAgent
 
 
 # ─── Agent configurations ─────────────────────────────────────────
@@ -50,24 +51,28 @@ def _build_agents():
     from agents.mcts import MCTSAgent
     from agents.expectimax_snake import ExpectimaxSnakeAgent
     from agents.ppo2048 import PPOAgent
+    from agents.ntuple_agent import NTupleAgent
 
-    import os
-    ppo_ckpt = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        'checkpoints', 'ppo_model.pt',
-    )
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    ppo_ckpt = os.path.join(_root, 'checkpoints', 'ppo_model.pt')
+
+    ntuple_agent   = os.path.join(_root, 'checkpoints', 'ntuple_best_agent.pkl')
+    ntuple_weights = os.path.join(_root, 'checkpoints', 'ntuple_best_agent_weights.pkl')
 
     return [
         BeamSearchAgent(beam_width=10, search_depth=15),
         ExpectimaxSnakeAgent(depth=2),
         MCTSAgent(num_simulations=300, rollout_depth=15),
         PPOAgent(model_path=ppo_ckpt if os.path.exists(ppo_ckpt) else None),
+        NTupleAgent(agent_path=ntuple_agent, weights_path=ntuple_weights),
+        RandomAgent(),
     ]
 
 
 # ─── Layout constants ─────────────────────────────────────────────
 
-COLS        = 2          # panels across
+COLS        = 3          # panels across
 ROWS        = 2          # panels down
 CELL_SIZE   = 80         # px per tile
 CELL_PAD    = 8          # px between tiles
@@ -77,8 +82,8 @@ BG_COLOR    = (50, 50, 50)
 PANEL_BG    = (187, 173, 160)
 DONE_TINT   = (30, 30, 30)   # dark overlay when game is over
 
-TILE_COLORS     = Game2048Visual.TILE_COLORS
-DEFAULT_TILE_CLR= Game2048Visual.DEFAULT_TILE_COLOR
+TILE_COLORS      = Game2048Visual.TILE_COLORS
+DEFAULT_TILE_CLR = Game2048Visual.DEFAULT_TILE_COLOR
 
 
 # ─── Shared state ─────────────────────────────────────────────────
@@ -93,7 +98,7 @@ class AgentState:
         self.score         = 0
         self.moves         = 0
         self.done          = False
-        self.moves_per_sec = 0.0   # rolling moves/sec
+        self.moves_per_sec = 0.0
         self.lock          = threading.Lock()
 
 
@@ -130,12 +135,12 @@ def agent_loop(agent, config, state: AgentState, stop_event: threading.Event):
 
             window_moves += 1
             elapsed = time.time() - window_start
-            if elapsed >= 0.5:                        # update speed every 0.5s
+            if elapsed >= 0.5:
                 mps = window_moves / elapsed
                 window_moves = 0
                 window_start = time.time()
             else:
-                mps = state.moves_per_sec             # keep last value
+                mps = state.moves_per_sec
 
             with state.lock:
                 state.board         = game.get_state().copy()
@@ -156,17 +161,15 @@ def agent_loop(agent, config, state: AgentState, stop_event: threading.Event):
 
 def draw_panel(surface, state_snap, rect: pygame.Rect, fonts):
     """Render one agent's panel into `rect` on `surface`."""
-    grid   = state_snap.grid_size
-    board  = state_snap.board
-    score  = state_snap.score
-    moves  = state_snap.moves
-    mps    = state_snap.moves_per_sec
-    done   = state_snap.done
+    grid  = state_snap.grid_size
+    board = state_snap.board
+    score = state_snap.score
+    moves = state_snap.moves
+    mps   = state_snap.moves_per_sec
+    done  = state_snap.done
 
-    # Panel background
     pygame.draw.rect(surface, PANEL_BG, rect, border_radius=8)
 
-    # ── Header text ──────────────────────────────────────────────
     x0, y0 = rect.x + 8, rect.y + 6
 
     name_surf = fonts['name'].render(state_snap.name, True, (255, 255, 255))
@@ -182,17 +185,15 @@ def draw_panel(surface, state_snap, rect: pygame.Rect, fonts):
         status_surf = fonts['stat'].render(mps_str, True, (200, 240, 200))
     surface.blit(status_surf, (x0, y0 + 48))
 
-    # ── Board tiles ───────────────────────────────────────────────
     board_x = rect.x + CELL_PAD
     board_y = rect.y + HEADER_H
 
     for r in range(grid):
         for c in range(grid):
-            val  = int(board[r, c])
-            tx   = board_x + c * (CELL_SIZE + CELL_PAD)
-            ty   = board_y + r * (CELL_SIZE + CELL_PAD)
-            tile = pygame.Rect(tx, ty, CELL_SIZE, CELL_SIZE)
-
+            val   = int(board[r, c])
+            tx    = board_x + c * (CELL_SIZE + CELL_PAD)
+            ty    = board_y + r * (CELL_SIZE + CELL_PAD)
+            tile  = pygame.Rect(tx, ty, CELL_SIZE, CELL_SIZE)
             color = TILE_COLORS.get(val, DEFAULT_TILE_CLR)
             pygame.draw.rect(surface, color, tile, border_radius=5)
 
@@ -201,7 +202,6 @@ def draw_panel(surface, state_snap, rect: pygame.Rect, fonts):
                 num = fonts['tile'].render(str(val), True, tc)
                 surface.blit(num, num.get_rect(center=tile.center))
 
-    # ── Done overlay ─────────────────────────────────────────────
     if done:
         overlay = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 110))
@@ -220,10 +220,9 @@ def run_multi_visual(agents, config):
     pygame.init()
     grid_size = config.get('grid_size', 4)
 
-    # Compute panel size from board dimensions
-    board_px    = grid_size * (CELL_SIZE + CELL_PAD) + CELL_PAD
-    panel_w     = board_px
-    panel_h     = HEADER_H + board_px
+    board_px = grid_size * (CELL_SIZE + CELL_PAD) + CELL_PAD
+    panel_w  = board_px
+    panel_h  = HEADER_H + board_px
 
     win_w = COLS * panel_w + (COLS + 1) * PANEL_PAD
     win_h = ROWS * panel_h + (ROWS + 1) * PANEL_PAD
@@ -239,10 +238,8 @@ def run_multi_visual(agents, config):
         'gameover': pygame.font.Font(None, 40),
     }
 
-    # Build per-agent state objects
     states = [AgentState(agent.name, grid_size) for agent in agents]
 
-    # Compute panel rects (row-major)
     panel_rects = []
     for idx in range(len(agents)):
         row = idx // COLS
@@ -251,7 +248,6 @@ def run_multi_visual(agents, config):
         ry  = PANEL_PAD + row * (panel_h + PANEL_PAD)
         panel_rects.append(pygame.Rect(rx, ry, panel_w, panel_h))
 
-    # Start one thread per agent
     stop_event = threading.Event()
     threads = []
     for agent, state in zip(agents, states):
@@ -273,10 +269,8 @@ def run_multi_visual(agents, config):
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_q:
                 running = False
 
-        # Stop when every agent has finished
         all_done = all(s.done for s in states)
         if all_done:
-            # One final render then exit
             screen.fill(BG_COLOR)
             for state, rect in zip(states, panel_rects):
                 with state.lock:
@@ -284,7 +278,7 @@ def run_multi_visual(agents, config):
                     snap.board = state.board.copy()
                 draw_panel(screen, snap, rect, fonts)
             pygame.display.flip()
-            pygame.time.delay(1500)   # brief pause so user can see final state
+            pygame.time.delay(1500)
             running = False
 
         screen.fill(BG_COLOR)
@@ -300,7 +294,6 @@ def run_multi_visual(agents, config):
     stop_event.set()
     pygame.quit()
 
-    # ── Final results ─────────────────────────────────────────────
     print(f"\n{'Agent':<30} {'Score':>10}  {'Moves':>8}  {'Status'}")
     print("-" * 60)
     for state in states:
