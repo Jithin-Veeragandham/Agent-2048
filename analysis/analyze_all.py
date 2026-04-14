@@ -48,37 +48,37 @@ AGENTS = {
         "file": "expectimax_snake_runs.jsonl",
         "color": "#2ecc71",
         "short": "Expectimax\nSnake",
-        "run_id": "20746c9b-5ff",
+        "run_id": None,
     },
     "MCTS": {
         "file": "mcts_runs.jsonl",
         "color": "#9b59b6",
         "short": "MCTS",
-        "run_id": "17602ce1-5bc",
+        "run_id": None,
     },
     "PPO": {
         "file": "PPO_runs.jsonl",
         "color": "#e74c3c",
         "short": "PPO",
-        "run_id": "aee9fc06-16d",
+        "run_id": None,
     },
     "BeamSearch": {
         "file": "beam_search_runs.jsonl",
         "color": "#e67e22",
         "short": "Beam\nSearch",
-        "run_id": "d2b82f14-d47",
+        "run_id": None,
     },
     "NTuple": {
         "file": "ntuple_agent_runs.jsonl",
         "color": "#1abc9c",
-        "short": "NTuple",
-        "run_id": "eeb816ca-32d",
+        "short": "N-Tuple\nTD",
+        "run_id": None,
     },
 }
 
 REWARD_COMPONENTS = ["tile_score", "empty_bonus", "monotonicity", "corner_bonus", "merge_potential", "smoothness"]
 REWARD_LABELS     = ["Tile Score", "Empty Bonus", "Monotonicity", "Corner Bonus", "Merge Potential", "Smoothness"]
-FLIP_SIGN         = {"smoothness": True, "monotonicity": False}
+FLIP_SIGN         = {"smoothness": True}
 
 OUTPUT_DIR = "results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -326,6 +326,85 @@ plt.close()
 print(f"Saved: avg_scores.png")
 
 
+# 1e. Inference time distribution (log scale bar + jittered scatter)
+inf_times_all = {n: [g.get("avg_inference_ms", 0) for g in data[n]] for n in agent_names}
+avg_inf   = [np.mean(inf_times_all[n]) for n in agent_names]
+std_inf   = [np.std(inf_times_all[n])  for n in agent_names]
+
+fig, (ax_bar, ax_box) = plt.subplots(1, 2, figsize=(14, 5))
+fig.suptitle("Inference Time per Move by Agent", fontsize=13, fontweight="bold")
+
+# Left: log-scale bar chart
+bars_inf = ax_bar.bar(x, avg_inf, width=0.6, color=agent_colors, alpha=0.85,
+                      yerr=std_inf, capsize=4, error_kw=dict(ecolor="black", lw=1.5))
+for bar, avg, std in zip(bars_inf, avg_inf, std_inf):
+    ax_bar.text(bar.get_x() + bar.get_width() / 2,
+                max(avg + std, avg * 1.1) * 1.05,
+                f"{avg:.1f} ms", ha="center", va="bottom", fontsize=9, fontweight="bold")
+ax_bar.set_yscale("log")
+ax_bar.set_xticks(x); ax_bar.set_xticklabels(short_labels, fontsize=9)
+ax_bar.set_ylabel("Avg inference time per move (ms, log scale)")
+ax_bar.set_title("Mean ± Std (log scale)")
+ax_bar.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}ms"))
+ax_bar.grid(axis="y", alpha=0.3, which="both")
+
+# Right: box plot showing per-game distribution
+bp = ax_box.boxplot([inf_times_all[n] for n in agent_names],
+                    patch_artist=True, notch=False,
+                    medianprops=dict(color="black", linewidth=2))
+for patch, color in zip(bp["boxes"], agent_colors):
+    patch.set_facecolor(color); patch.set_alpha(0.7)
+ax_box.set_yscale("log")
+ax_box.set_xticks(range(1, len(agent_names) + 1))
+ax_box.set_xticklabels(short_labels, fontsize=9)
+ax_box.set_ylabel("Avg inference time per move (ms, log scale)")
+ax_box.set_title("Distribution across 100 games")
+ax_box.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}ms"))
+ax_box.grid(axis="y", alpha=0.3, which="both")
+
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "inference_times.png"), dpi=150, bbox_inches="tight")
+plt.close()
+print(f"Saved: inference_times.png")
+
+
+# 1f. Combined: Tile Distribution / Inference Time
+fig_c, (ax_tile, ax_inf) = plt.subplots(1, 2, figsize=(14, 6))
+fig_c.suptitle("Agent Performance Overview", fontsize=14, fontweight="bold")
+
+# ── Tile distribution (stacked bar) ─────────────────────────────────
+bottom_c = np.zeros(len(agent_names))
+for label, predicate, color in TILE_BUCKETS:
+    rates = [sum(1 for t in stats[n]["tiles"] if predicate(t)) / stats[n]["n"] * 100
+             for n in agent_names]
+    ax_tile.bar(x, rates, 0.6, bottom=bottom_c, color=color,
+                label=label, alpha=0.9, edgecolor="white", linewidth=0.5)
+    bottom_c += np.array(rates)
+ax_tile.set_xticks(x); ax_tile.set_xticklabels(short_labels, fontsize=9)
+ax_tile.set_ylabel("% of Games"); ax_tile.set_ylim(0, 108)
+ax_tile.set_title("Max Tile Distribution")
+ax_tile.legend(title="Max Tile", loc="upper right", fontsize=8, ncol=2)
+ax_tile.grid(axis="y", alpha=0.3)
+
+# ── Inference time (log scale bar) ──────────────────────────────────
+bars_inf2 = ax_inf.bar(x, avg_inf, width=0.6, color=agent_colors, alpha=0.85,
+                       yerr=std_inf, capsize=4, error_kw=dict(ecolor="black", lw=1.5))
+for bar, v in zip(bars_inf2, avg_inf):
+    ax_inf.text(bar.get_x() + bar.get_width()/2, bar.get_height() * 1.15,
+                f"{v:.1f}ms", ha="center", va="bottom", fontsize=8, fontweight="bold")
+ax_inf.set_yscale("log")
+ax_inf.set_xticks(x); ax_inf.set_xticklabels(short_labels, fontsize=9)
+ax_inf.set_ylabel("Avg inference time / move (ms, log scale)")
+ax_inf.set_title("Inference Time per Move")
+ax_inf.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}ms"))
+ax_inf.grid(axis="y", alpha=0.3, which="both")
+
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "overview.png"), dpi=150, bbox_inches="tight")
+plt.close()
+print(f"Saved: overview.png")
+
+
 # ─────────────────────────────────────────────
 #  PART 2 — STRATEGY ANALYSIS (helpers)
 # ─────────────────────────────────────────────
@@ -379,6 +458,135 @@ def wilson_ci(w, n, z=1.96):
     centre = (p + z**2 / (2*n)) / denom
     margin = z * np.sqrt(p*(1-p)/n + z**2/(4*n**2)) / denom
     return max(0, centre - margin), min(1, centre + margin)
+
+
+# ─────────────────────────────────────────────
+#  Strategy plot helpers (move-level)
+# ─────────────────────────────────────────────
+
+_COMP_COLORS = ["#2ecc71", "#3498db", "#9b59b6", "#e74c3c", "#f39c12", "#1abc9c"]
+_N_BINS_STRAT = 100
+
+def _interp_strat(vals):
+    n = len(vals)
+    if n < 2:
+        return None
+    return np.interp(np.linspace(0, 1, _N_BINS_STRAT),
+                     np.linspace(0, 1, n), vals)
+
+
+def plot_strategy_area(games, out_path, title_suffix=""):
+    """Stacked area chart: relative share of each heuristic component over game progress.
+
+    Shows HOW the agent allocates its heuristic budget as the game evolves —
+    which components dominate early vs late game.
+    """
+    shares = {c: [] for c in REWARD_COMPONENTS}
+
+    for g in games:
+        moves = g.get("move_reward_breakdowns")
+        if not moves:
+            continue
+        # Flip sign so all components point in a positive direction
+        raw = {}
+        for comp in REWARD_COMPONENTS:
+            flip = -1 if FLIP_SIGN.get(comp) else 1
+            v = np.array([m.get(comp, 0) * flip for m in moves], dtype=float)
+            v -= v.min()          # shift to ≥ 0
+            raw[comp] = v
+
+        total = sum(raw[c] for c in REWARD_COMPONENTS)
+        total = np.where(total > 0, total, 1.0)
+
+        for comp in REWARD_COMPONENTS:
+            interp = _interp_strat(raw[comp] / total)
+            if interp is not None:
+                shares[comp].append(interp)
+
+    if not any(shares[c] for c in REWARD_COMPONENTS):
+        return
+
+    x = np.linspace(0, 100, _N_BINS_STRAT)
+    means = np.array([np.mean(shares[c], axis=0) if shares[c]
+                      else np.zeros(_N_BINS_STRAT) for c in REWARD_COMPONENTS])
+
+    # Re-normalise so rows sum to 1 at each x point
+    col_sum = means.sum(axis=0)
+    col_sum = np.where(col_sum > 0, col_sum, 1.0)
+    means = means / col_sum * 100.0
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.stackplot(x, means, labels=REWARD_LABELS,
+                 colors=_COMP_COLORS, alpha=0.82)
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 100)
+    ax.set_xlabel("Game Progress (%)", fontsize=10)
+    ax.set_ylabel("Relative Heuristic Share (%)", fontsize=10)
+    ax.set_title(
+        f"Strategy Composition — {title_suffix}\n"
+        "Which heuristic dominates the agent's evaluation at each stage",
+        fontsize=11, fontweight="bold"
+    )
+    ax.legend(loc="upper left", fontsize=8, ncol=2, framealpha=0.7)
+    # Phase dividers
+    for pct in [25, 50, 75]:
+        ax.axvline(pct, color="white", linewidth=1.2, linestyle="--", alpha=0.6)
+        ax.text(pct + 0.5, 97, f"Q{pct//25 + 1}", fontsize=7,
+                color="white", va="top", alpha=0.8)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def plot_component_coupling(games, out_path, title_suffix=""):
+    """6×6 Pearson correlation heatmap of heuristic components across all moves.
+
+    Reveals which components the agent treats as coupled strategies —
+    e.g., always building corner bonus and monotonicity together.
+    """
+    all_vals = {c: [] for c in REWARD_COMPONENTS}
+
+    for g in games:
+        moves = g.get("move_reward_breakdowns")
+        if not moves:
+            continue
+        for comp in REWARD_COMPONENTS:
+            flip = -1 if FLIP_SIGN.get(comp) else 1
+            all_vals[comp].extend(m.get(comp, 0) * flip for m in moves)
+
+    if not all_vals[REWARD_COMPONENTS[0]]:
+        return
+
+    matrix = np.array([all_vals[c] for c in REWARD_COMPONENTS], dtype=float)
+    corr = np.corrcoef(matrix)   # (6, 6)
+
+    short_labels = ["Tile\nScore", "Empty\nBonus", "Mono-\ntonicity",
+                    "Corner\nBonus", "Merge\nPotential", "Smooth-\nness"]
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    im = ax.imshow(corr, cmap="RdYlGn", vmin=-1, vmax=1, aspect="auto",
+                   interpolation="nearest")
+
+    for i in range(6):
+        for j in range(6):
+            txt_color = "black" if abs(corr[i, j]) < 0.6 else "white"
+            ax.text(j, i, f"{corr[i, j]:.2f}", ha="center", va="center",
+                    fontsize=9, fontweight="bold", color=txt_color)
+
+    ax.set_xticks(range(6))
+    ax.set_yticks(range(6))
+    ax.set_xticklabels(short_labels, fontsize=8)
+    ax.set_yticklabels(short_labels, fontsize=8)
+    ax.set_title(
+        f"Heuristic Coupling — {title_suffix}\n"
+        "Pearson r across all moves (green = move together, red = oppose)",
+        fontsize=11, fontweight="bold"
+    )
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label("Pearson r", fontsize=9)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
 
 
 # ─────────────────────────────────────────────
@@ -557,6 +765,48 @@ for name in agent_names:
     plt.savefig(os.path.join(agent_dir, "scatter.png"), dpi=150, bbox_inches="tight")
     plt.close(fig2)
     print(f"  Saved: {name}/scatter.png")
+
+    # ── Heuristic trajectory plots (move-level, if available) ─────────
+    import importlib.util, sys as _sys
+    _ht_path = os.path.join(os.path.dirname(__file__), "heuristic_trajectory.py")
+    _spec = importlib.util.spec_from_file_location("heuristic_trajectory", _ht_path)
+    _ht = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_ht)
+    plot_win_loss_diff    = _ht.plot_win_loss_diff
+    plot_phase_bars       = _ht.plot_phase_bars
+    plot_average_trajectory = _ht.plot_average_trajectory
+    plot_dominance_heatmap  = _ht.plot_dominance_heatmap
+    games_with_moves = [g for g in games if g.get("move_reward_breakdowns")]
+    if games_with_moves:
+        agent_wins   = [g for g in games_with_moves if g.get("reached_2048") or g.get("won")]
+        agent_losses = [g for g in games_with_moves if not (g.get("reached_2048") or g.get("won"))]
+        plot_average_trajectory(games_with_moves,
+                                os.path.join(agent_dir, "heuristic_trajectory_all.png"),
+                                title_suffix="All Games")
+        plot_average_trajectory(agent_wins,
+                                os.path.join(agent_dir, "heuristic_trajectory_wins.png"),
+                                title_suffix="Wins")
+        plot_average_trajectory(agent_losses,
+                                os.path.join(agent_dir, "heuristic_trajectory_losses.png"),
+                                title_suffix="Losses")
+        plot_win_loss_diff(agent_wins, agent_losses,
+                           os.path.join(agent_dir, "heuristic_win_loss_diff.png"),
+                           title_suffix=name)
+        plot_phase_bars(agent_wins, agent_losses,
+                        os.path.join(agent_dir, "heuristic_phase_bars.png"),
+                        title_suffix=name)
+        plot_dominance_heatmap(games_with_moves,
+                               os.path.join(agent_dir, "heuristic_dominance_all.png"),
+                               title_suffix="All Games")
+        plot_strategy_area(games_with_moves,
+                           os.path.join(agent_dir, "strategy_composition.png"),
+                           title_suffix=name)
+        plot_component_coupling(games_with_moves,
+                                os.path.join(agent_dir, "component_coupling.png"),
+                                title_suffix=name)
+        print(f"  Saved: {name}/heuristic_*.png + strategy_composition + component_coupling")
+    else:
+        print(f"  [SKIP] {name}: no move_reward_breakdowns — run with log_move_detail=True")
 
 
 # ─────────────────────────────────────────────
@@ -776,7 +1026,7 @@ plt.close(fig5)
 print(f"Saved: comparison_performance.png")
 
 # ── Figure C6: Heuristic percentile box plots (grouped by component) ─
-FLIP_SIGN = {"monotonicity": -1, "corner_bonus": -1}
+FLIP_SIGN = {"smoothness": -1}
 
 fig6, axes6 = plt.subplots(2, 3, figsize=(16, 10))
 fig6.suptitle("Heuristic Component Distribution per Agent\n(avg per game, normalized to [0,1] per component)",
@@ -1004,6 +1254,84 @@ if agents_with_moves:
                     dpi=150, bbox_inches="tight")
         plt.close(fig8)
         print(f"Saved: comparison_win_advantage_heatmap.png")
+
+
+# ── Figure C9: Cumulative quartile heatmap (4 subplots, one per game phase)
+# Rows = agents, Cols = heuristic components
+# Cell colour = mean_norm(wins) - mean_norm(losses)
+# All 4 subplots share the same diverging colorscale.
+
+if heat_data:
+    QUARTILE_TITLES = [
+        "Q1 — Early Game (0–25%)",
+        "Q2 — Mid-Early (25–50%)",
+        "Q3 — Mid-Late (50–75%)",
+        "Q4 — Late Game (75–100%)",
+    ]
+    comp_labels_short = ["Tile\nScore", "Empty\nBonus", "Mono-\ntonicity",
+                         "Corner\nBonus", "Merge\nPotential", "Smooth-\nness"]
+    c9_agents = [n for n in agents_with_moves if n in heat_data]
+    n_c9 = len(c9_agents)
+
+    # Build per-quartile matrices: shape (n_agents, 6) for each quartile
+    quartile_mats = []
+    for q in range(4):
+        mat = np.array([heat_data[n][:, q] for n in c9_agents])  # (n_agents, 6)
+        quartile_mats.append(mat)
+
+    vmax_c9 = max(np.abs(m).max() for m in quartile_mats)
+    vmax_c9 = max(vmax_c9, 0.05)
+
+    fig9, axes9 = plt.subplots(2, 2, figsize=(14, 8), constrained_layout=True)
+    fig9.suptitle(
+        "Win vs Loss — Heuristic Advantage by Game Stage\n"
+        "(green = component higher in wins, red = higher in losses)",
+        fontsize=13, fontweight="bold",
+    )
+
+    agent_short_labels = [AGENTS[n]["short"].replace("\n", " ") for n in c9_agents]
+    agent_colors_c9    = [AGENTS[n]["color"] for n in c9_agents]
+
+    im9 = None
+    for idx, (ax, title, mat) in enumerate(
+            zip(axes9.flat, QUARTILE_TITLES, quartile_mats)):
+        im9 = ax.imshow(mat, aspect="auto", cmap="RdYlGn",
+                        vmin=-vmax_c9, vmax=vmax_c9, interpolation="nearest")
+
+        # Annotate each cell
+        for r in range(n_c9):
+            for c in range(len(REWARD_COMPONENTS)):
+                val = mat[r, c]
+                txt_color = "black" if abs(val) < vmax_c9 * 0.6 else "white"
+                ax.text(c, r, f"{val:+.2f}", ha="center", va="center",
+                        fontsize=8, fontweight="bold", color=txt_color)
+
+        ax.set_title(title, fontsize=11, fontweight="bold", pad=8)
+        ax.set_xticks(range(len(REWARD_COMPONENTS)))
+        ax.set_xticklabels(comp_labels_short, fontsize=8)
+        ax.set_yticks(range(n_c9))
+        ax.set_yticklabels(agent_short_labels, fontsize=9)
+
+        # Color-code y-axis tick labels by agent color
+        for tick, color in zip(ax.get_yticklabels(), agent_colors_c9):
+            tick.set_color(color)
+            tick.set_fontweight("bold")
+
+        # Add a faint vertical separator between component groups
+        for x in [0.5, 1.5, 2.5, 3.5, 4.5]:
+            ax.axvline(x, color="white", linewidth=0.8, alpha=0.5)
+        for y in [i + 0.5 for i in range(n_c9 - 1)]:
+            ax.axhline(y, color="white", linewidth=0.8, alpha=0.5)
+
+    if im9 is not None:
+        cbar9 = fig9.colorbar(im9, ax=axes9, shrink=0.6, pad=0.02,
+                              orientation="vertical")
+        cbar9.set_label("Win mean − Loss mean (normalised)", fontsize=9)
+
+    plt.savefig(os.path.join(OUTPUT_DIR, "comparison_cumulative_quartile_heatmap.png"),
+                dpi=150, bbox_inches="tight")
+    plt.close(fig9)
+    print(f"Saved: comparison_cumulative_quartile_heatmap.png")
 
 
 print(f"\nAll outputs saved to {OUTPUT_DIR}/")

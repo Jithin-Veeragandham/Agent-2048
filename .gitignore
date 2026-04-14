@@ -26,3 +26,6 @@ archive/
 
 CLAUDE.md
 .claude/
+
+checkpoints\ntuple_best_agent.pkl
+checkpoints\ntuple_best_agent

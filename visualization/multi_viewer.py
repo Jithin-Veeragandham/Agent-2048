@@ -1,37 +1,33 @@
-# coding: utf-8
 """
 multi_viewer.py
 ===============
 
 Watch all agents play simultaneously on a single screen.
 
-Each agent runs in its own background thread and plays one complete game.
-The display updates at ~30 fps until every agent finishes or Q is pressed.
-Final scores and move counts are printed to the terminal on exit.
+Each agent runs in its own background **process** (not thread), so the
+Python GIL never causes starvation — fast agents (PPO) run at their
+true speed independently of slow ones (BeamSearch).
+
+State updates flow from worker processes → main process via a small
+Queue, keeping display overhead out of the agent loop.
 
 Usage::
 
     python visualization/multi_viewer.py
 
-Layout (2x3):
-    +---------------------+---------------------+---------------------+
-    |  BeamSearch(w=10)   |  ExpectimaxSnake    |    MCTS(n=300)      |
-    |  Score: 18,432      |  Score: 63,931      |  Score: 12,048      |
-    |  47 moves/sec       |  12 moves/sec       |  3 moves/sec        |
-    |  [board]            |  [board]            |  [board]            |
-    +---------------------+---------------------+---------------------+
-    |  PPO                |  NTuple             |  Random             |
-    |  Score: 37,937      |  Score: 80,921      |  Score: 980         |
-    |  890 moves/sec      |  1200 moves/sec     |  890 moves/sec      |
-    |  [board]            |  [board]            |  [board]            |
-    +---------------------+---------------------+---------------------+
+Layout (3×2):
+    ┌──────────────┬──────────────┬──────────────┐
+    │  Random      │  BeamSearch  │  MCTS        │
+    ├──────────────┼──────────────┼──────────────┤
+    │  Expectimax  │  PPO         │  N-Tuple TD  │
+    └──────────────┴──────────────┴──────────────┘
 """
 
 import os
 import sys
 import time
-import threading
 import copy
+import multiprocessing as mp
 
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 import pygame
@@ -41,7 +37,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from game.engine import Game2048, Game2048Visual, Action
 from framework.evaluation import REWARD_SEARCH
-from framework.interaction import RandomAgent
+from agents.base import BaseAgent
+
+
+# ─── Random agent (module-level so multiprocessing can pickle it) ─
+
+class RandomAgent(BaseAgent):
+    agent_type = "random"
+    def choose_action(self, state, available_moves, game_context=None):
+        return available_moves[np.random.randint(len(available_moves))]
+    def get_params(self):
+        return {}
 
 
 # ─── Agent configurations ─────────────────────────────────────────
@@ -54,42 +60,39 @@ def _build_agents():
     from agents.ntuple_agent import NTupleAgent
 
     _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-    ppo_ckpt = os.path.join(_root, 'checkpoints', 'ppo_model.pt')
-
-    ntuple_agent   = os.path.join(_root, 'checkpoints', 'ntuple_best_agent.pkl')
-    ntuple_weights = os.path.join(_root, 'checkpoints', 'ntuple_best_agent_weights.pkl')
+    ppo_ckpt    = os.path.join(_root, 'checkpoints', 'ppo_model.pt')
+    ntuple_ckpt = os.path.join(_root, 'checkpoints', 'ntuple_best_agent_portable.pkl')
+    ntuple_wts  = None   # portable pkl already contains weights
 
     return [
+        RandomAgent("Random"),
         BeamSearchAgent(beam_width=10, search_depth=15),
-        ExpectimaxSnakeAgent(depth=2),
         MCTSAgent(num_simulations=300, rollout_depth=15),
-        PPOAgent(model_path=ppo_ckpt if os.path.exists(ppo_ckpt) else None),
-        NTupleAgent(agent_path=ntuple_agent, weights_path=ntuple_weights),
-        RandomAgent(),
+        ExpectimaxSnakeAgent(depth=2),
+        PPOAgent(model_path=ppo_ckpt if os.path.exists(ppo_ckpt) else None, device='cpu'),
+        NTupleAgent(agent_path=ntuple_ckpt, weights_path=ntuple_wts, name="N-Tuple TD"),
     ]
 
 
 # ─── Layout constants ─────────────────────────────────────────────
 
-COLS        = 3          # panels across
-ROWS        = 2          # panels down
-CELL_SIZE   = 80         # px per tile
-CELL_PAD    = 8          # px between tiles
-HEADER_H    = 90         # px above the board for text
-PANEL_PAD   = 12         # px between panels
-BG_COLOR    = (50, 50, 50)
-PANEL_BG    = (187, 173, 160)
-DONE_TINT   = (30, 30, 30)   # dark overlay when game is over
+COLS            = 3   # 5 agents → 3×2 grid (last slot empty)
+ROWS            = 2
+CELL_SIZE       = 80
+CELL_PAD        = 8
+HEADER_H        = 90
+PANEL_PAD       = 12
+BG_COLOR        = (50, 50, 50)
+PANEL_BG        = (187, 173, 160)
 
 TILE_COLORS      = Game2048Visual.TILE_COLORS
 DEFAULT_TILE_CLR = Game2048Visual.DEFAULT_TILE_COLOR
 
 
-# ─── Shared state ─────────────────────────────────────────────────
+# ─── Display-side state (main process only) ───────────────────────
 
 class AgentState:
-    """Thread-safe snapshot of one agent's game."""
+    """Latest known snapshot of one agent's game (main process only)."""
 
     def __init__(self, name: str, grid_size: int):
         self.name          = name
@@ -99,29 +102,41 @@ class AgentState:
         self.moves         = 0
         self.done          = False
         self.moves_per_sec = 0.0
-        self.lock          = threading.Lock()
 
 
-# ─── Agent thread ─────────────────────────────────────────────────
+# ─── Worker process entry point ───────────────────────────────────
 
-def agent_loop(agent, config, state: AgentState, stop_event: threading.Event):
-    """Play one complete game, writing results into `state` after every move."""
+def agent_worker(agent, config, queue: mp.Queue, stop_event: mp.Event):
+    """Run one complete game and stream state updates into `queue`.
+
+    Runs in a separate process — no GIL sharing with other agents.
+    Sends (board, score, moves, mps, done) tuples. Uses put_nowait so
+    a slow display loop never blocks the agent loop.
+    """
+    # Re-import inside worker (needed on Windows spawn)
+    import time
+    import numpy as np
+    from game.engine import Game2048
+    from framework.evaluation import REWARD_SEARCH
+
     game = Game2048(config)
     agent.on_episode_start()
 
+    moves        = 0
     window_moves = 0
     window_start = time.time()
+    mps          = 0.0
 
     while not game.is_game_over() and not stop_event.is_set():
         available = game.get_available_moves()
         if not available:
             break
 
-        board_snap = game.get_state()
+        board_snap   = game.get_state()
         game_context = {
             'game':        game,
             'score':       game.get_score(),
-            'move_number': state.moves,
+            'move_number': moves,
             'reward_fn':   REWARD_SEARCH,
         }
 
@@ -130,57 +145,49 @@ def agent_loop(agent, config, state: AgentState, stop_event: threading.Event):
 
         if valid:
             next_state = game.get_state()
-            done = game.is_game_over()
+            done       = game.is_game_over()
             agent.on_move_result(board_snap, action, reward, next_state, done)
 
             window_moves += 1
             elapsed = time.time() - window_start
             if elapsed >= 0.5:
-                mps = window_moves / elapsed
+                mps          = window_moves / elapsed
                 window_moves = 0
                 window_start = time.time()
-            else:
-                mps = state.moves_per_sec
 
-            with state.lock:
-                state.board         = game.get_state().copy()
-                state.score         = game.get_score()
-                state.moves        += 1
-                state.moves_per_sec = mps
+            moves += 1
 
-    final_state = game.get_state()
-    agent.on_episode_end(final_state, game.get_score())
+            # Non-blocking send — drop update if display is busy
+            try:
+                queue.put_nowait((game.get_state().copy(), game.get_score(), moves, mps, False))
+            except Exception:
+                pass
 
-    with state.lock:
-        state.board = game.get_state().copy()
-        state.score = game.get_score()
-        state.done  = True
+    final_board = game.get_state().copy()
+    final_score = game.get_score()
+    agent.on_episode_end(final_board, final_score)
+
+    # Final update must get through (blocking)
+    queue.put((final_board, final_score, moves, mps, True))
 
 
 # ─── Panel renderer ───────────────────────────────────────────────
 
-def draw_panel(surface, state_snap, rect: pygame.Rect, fonts):
-    """Render one agent's panel into `rect` on `surface`."""
-    grid  = state_snap.grid_size
-    board = state_snap.board
-    score = state_snap.score
-    moves = state_snap.moves
-    mps   = state_snap.moves_per_sec
-    done  = state_snap.done
+def draw_panel(surface, state: AgentState, rect: pygame.Rect, fonts):
+    grid  = state.grid_size
+    board = state.board
 
     pygame.draw.rect(surface, PANEL_BG, rect, border_radius=8)
 
     x0, y0 = rect.x + 8, rect.y + 6
 
-    name_surf = fonts['name'].render(state_snap.name, True, (255, 255, 255))
-    surface.blit(name_surf, (x0, y0))
+    surface.blit(fonts['name'].render(state.name, True, (255, 255, 255)), (x0, y0))
+    surface.blit(fonts['stat'].render(f"Score: {state.score:,}", True, (255, 255, 255)), (x0, y0 + 26))
 
-    score_surf = fonts['stat'].render(f"Score: {score:,}", True, (255, 255, 255))
-    surface.blit(score_surf, (x0, y0 + 26))
-
-    if done:
-        status_surf = fonts['stat'].render(f"DONE  {moves:,} moves", True, (255, 220, 80))
+    if state.done:
+        status_surf = fonts['stat'].render(f"DONE  {state.moves:,} moves", True, (255, 220, 80))
     else:
+        mps = state.moves_per_sec
         mps_str = f"{mps:.0f} moves/sec" if mps >= 1 else f"{mps:.2f} moves/sec"
         status_surf = fonts['stat'].render(mps_str, True, (200, 240, 200))
     surface.blit(status_surf, (x0, y0 + 48))
@@ -196,13 +203,12 @@ def draw_panel(surface, state_snap, rect: pygame.Rect, fonts):
             tile  = pygame.Rect(tx, ty, CELL_SIZE, CELL_SIZE)
             color = TILE_COLORS.get(val, DEFAULT_TILE_CLR)
             pygame.draw.rect(surface, color, tile, border_radius=5)
-
             if val != 0:
                 tc  = (119, 110, 101) if val <= 4 else (255, 255, 255)
                 num = fonts['tile'].render(str(val), True, tc)
                 surface.blit(num, num.get_rect(center=tile.center))
 
-    if done:
+    if state.done:
         overlay = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 110))
         surface.blit(overlay, rect.topleft)
@@ -213,19 +219,15 @@ def draw_panel(surface, state_snap, rect: pygame.Rect, fonts):
 # ─── Main entry point ─────────────────────────────────────────────
 
 def run_multi_visual(agents, config):
-    """
-    Launch all agents in background threads and render them in one window.
-    Exits when all games finish or Q is pressed.
-    """
+    """Launch agents as separate processes and render them in one window."""
     pygame.init()
     grid_size = config.get('grid_size', 4)
 
     board_px = grid_size * (CELL_SIZE + CELL_PAD) + CELL_PAD
     panel_w  = board_px
     panel_h  = HEADER_H + board_px
-
-    win_w = COLS * panel_w + (COLS + 1) * PANEL_PAD
-    win_h = ROWS * panel_h + (ROWS + 1) * PANEL_PAD
+    win_w    = COLS * panel_w + (COLS + 1) * PANEL_PAD
+    win_h    = ROWS * panel_h + (ROWS + 1) * PANEL_PAD
 
     screen = pygame.display.set_mode((win_w, win_h))
     pygame.display.set_caption("2048 — Agent Race")
@@ -244,20 +246,25 @@ def run_multi_visual(agents, config):
     for idx in range(len(agents)):
         row = idx // COLS
         col = idx % COLS
-        rx  = PANEL_PAD + col * (panel_w + PANEL_PAD)
-        ry  = PANEL_PAD + row * (panel_h + PANEL_PAD)
-        panel_rects.append(pygame.Rect(rx, ry, panel_w, panel_h))
+        panel_rects.append(pygame.Rect(
+            PANEL_PAD + col * (panel_w + PANEL_PAD),
+            PANEL_PAD + row * (panel_h + PANEL_PAD),
+            panel_w, panel_h,
+        ))
 
-    stop_event = threading.Event()
-    threads = []
-    for agent, state in zip(agents, states):
-        t = threading.Thread(
-            target=agent_loop,
-            args=(agent, config, state, stop_event),
+    # One queue + stop event per agent
+    queues     = [mp.Queue(maxsize=4) for _ in agents]
+    stop_event = mp.Event()
+
+    processes = []
+    for agent, queue in zip(agents, queues):
+        p = mp.Process(
+            target=agent_worker,
+            args=(agent, config, queue, stop_event),
             daemon=True,
         )
-        t.start()
-        threads.append(t)
+        p.start()
+        processes.append(p)
 
     print("Running — Q to quit early\n")
 
@@ -269,25 +276,36 @@ def run_multi_visual(agents, config):
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_q:
                 running = False
 
-        all_done = all(s.done for s in states)
-        if all_done:
+        # Drain queues — apply latest update per agent
+        for state, queue in zip(states, queues):
+            if state.done:
+                continue
+            latest = None
+            try:
+                while True:
+                    latest = queue.get_nowait()
+            except Exception:
+                pass
+            if latest is not None:
+                board, score, moves, mps, done = latest
+                state.board         = board
+                state.score         = score
+                state.moves         = moves
+                state.moves_per_sec = mps
+                state.done          = done
+
+        # Exit once all agents finish
+        if all(s.done for s in states):
             screen.fill(BG_COLOR)
             for state, rect in zip(states, panel_rects):
-                with state.lock:
-                    snap = copy.copy(state)
-                    snap.board = state.board.copy()
-                draw_panel(screen, snap, rect, fonts)
+                draw_panel(screen, state, rect, fonts)
             pygame.display.flip()
             pygame.time.delay(1500)
             running = False
 
         screen.fill(BG_COLOR)
         for state, rect in zip(states, panel_rects):
-            with state.lock:
-                snap       = copy.copy(state)
-                snap.board = state.board.copy()
-            draw_panel(screen, snap, rect, fonts)
-
+            draw_panel(screen, state, rect, fonts)
         pygame.display.flip()
         clock.tick(30)
 
@@ -304,6 +322,7 @@ def run_multi_visual(agents, config):
 # ─── CLI ──────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
+    mp.freeze_support()   # needed for Windows packaged builds
     config = {'grid_size': 4, 'tile_2_probability': 0.9, 'initial_tiles': 2}
     agents = _build_agents()
     run_multi_visual(agents, config)

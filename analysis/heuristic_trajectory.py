@@ -36,7 +36,7 @@ COMPONENTS = ["tile_score", "empty_bonus", "monotonicity",
               "corner_bonus", "merge_potential", "smoothness"]
 LABELS     = ["Tile Score", "Empty Bonus", "Monotonicity",
               "Corner Bonus", "Merge Potential", "Smoothness"]
-FLIP_SIGN  = {"smoothness": True}   # negate so higher = better for all
+FLIP_SIGN  = {"smoothness": True}  # negate so higher = better for all
 
 COLORS = ["#2ecc71", "#3498db", "#9b59b6", "#e74c3c", "#f39c12", "#1abc9c"]
 SMOOTHING_WINDOW = 20   # rolling average window (moves)
@@ -232,14 +232,18 @@ def plot_win_loss_diff(wins: list, losses: list, out_path: str, title_suffix: st
         se_s = np.convolve(se, kernel, mode="same")
 
         ax.axhline(0, color="gray", linewidth=1, linestyle="--", alpha=0.6)
-        ax.fill_between(x, diff_s - se_s, diff_s + se_s, alpha=0.2, color=color)
-        ax.plot(x, diff_s, color=color, linewidth=2)
 
-        # Shade regions
-        ax.fill_between(x, 0, diff_s, where=(diff_s > 0), alpha=0.15, color="green",
+        # Win/loss fills first (bottom layer) — solid green/red, no color mixing
+        ax.fill_between(x, 0, diff_s, where=(diff_s > 0), alpha=0.25, color="green",
                         label="Win advantage")
-        ax.fill_between(x, 0, diff_s, where=(diff_s < 0), alpha=0.15, color="red",
+        ax.fill_between(x, 0, diff_s, where=(diff_s < 0), alpha=0.25, color="red",
                         label="Loss advantage")
+
+        # Confidence band — gray so it's clearly "uncertainty", never confused with green/red fills
+        ax.fill_between(x, diff_s - se_s, diff_s + se_s, alpha=0.2, color="gray")
+
+        # Line on top of everything
+        ax.plot(x, diff_s, color=color, linewidth=2)
 
         ax.set_title(label, fontsize=10, fontweight="bold")
         ax.set_xlabel("Game Progress (%)", fontsize=8)

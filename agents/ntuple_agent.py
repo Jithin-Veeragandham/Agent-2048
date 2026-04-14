@@ -63,6 +63,52 @@ from agents.base import BaseAgent
 
 
 # ================================================================
+#  N-TUPLE FEATURE EXTRACTION  (from abachurin/2048 r_learning.py)
+#  Copied here so no external package is needed at runtime.
+#
+#  f_6 returns 33 feature indices, one per weight table:
+#    indices  0-16  → 17 four-tile features  (16^4 = 65536 entries)
+#    indices 17-20  →  4 five-tile features  (16^5 = 1048576 entries)
+#    indices 21-32  → 12 six-tile features   (14^6 = 7529536 entries,
+#                                             tiles capped at 13)
+# ================================================================
+
+def _f_6(x: np.ndarray) -> np.ndarray:
+    """N-tuple feature extraction matching game2048.r_learning.f_6.
+
+    Args:
+        x: (4,4) int32 board in log2 representation (0=empty, 1=tile-2 …)
+
+    Returns:
+        numpy array of 33 integer feature indices.
+    """
+    # 4-tile column features  (4 columns → 4 indices, range 0..16^4-1)
+    x_vert = ((x[0, :] << 12) + (x[1, :] << 8) + (x[2, :] << 4) + x[3, :]).ravel()
+    # 4-tile row features  (4 rows → 4 indices)
+    x_hor = ((x[:, 0] << 12) + (x[:, 1] << 8) + (x[:, 2] << 4) + x[:, 3]).ravel()
+    # 4-tile 2×2 square features  (3×3 sliding window → 9 indices)
+    x_sq = ((x[:3, :3] << 12) + (x[1:, :3] << 8) + (x[:3, 1:] << 4) + x[1:, 1:]).ravel()
+    # 5-tile cross features centred on 2×2 interior  (→ 4 indices, range 0..16^5-1)
+    x_middle = (
+        (x[1:3, 1:3] << 16) + (x[:2, 1:3] << 12) +
+        (x[1:3, :2]  << 8)  + (x[2:, 1:3] << 4) + x[1:3, 2:]
+    ).ravel()
+    # 6-tile vertical-block features — tiles capped at 13, base-14 encoding
+    # (3 col × 2 row sliding blocks → 6 indices, range 0..14^6-1)
+    y = np.minimum(x, 13)
+    x_vert_6 = (
+        537824 * y[0:2, 0:3] + 38416 * y[1:3, 0:3] + 2744 * y[2:, 0:3] +
+           196 * y[0:2, 1:]  +    14 * y[1:3, 1:]  +       y[2:, 1:]
+    ).ravel()
+    # 6-tile horizontal-block features  (→ 6 indices)
+    x_hor_6 = (
+        537824 * y[0:3, 0:2] + 38416 * y[0:3, 1:3] + 2744 * y[0:3, 2:] +
+           196 * y[1:, 0:2]  +    14 * y[1:, 1:3]  +       y[1:, 2:]
+    ).ravel()
+    return np.concatenate([x_vert, x_hor, x_sq, x_middle, x_vert_6, x_hor_6])
+
+
+# ================================================================
 #  EMBEDDED GAME LOGIC (from abachurin/2048)
 #  Included here so no external repo or PYTHONPATH is needed.
 # ================================================================
@@ -182,10 +228,14 @@ class NTupleAgent(BaseAgent):
 
     agent_type: str = "ntuple_agent"
 
+    def __reduce__(self):
+        """Tell multiprocessing to reconstruct from paths, not the loaded agent."""
+        return (NTupleAgent, (self.agent_path, self.weights_path, self.name))
+
     def __init__(
         self,
         agent_path: str,
-        weights_path: str,
+        weights_path: Optional[str] = None,
         name: str = "N-Tuple TD Agent",
     ):
         super().__init__(name)
@@ -245,32 +295,45 @@ class NTupleAgent(BaseAgent):
         import types
         import importlib
 
+        # Cache of stub classes so the same (module, name) always returns
+        # the identical type object — required for isinstance checks in pickle.
+        _stub_cache = {}
+
+        def _make_stub(module, name):
+            key = (module, name)
+            if key not in _stub_cache:
+                _stub_cache[key] = type(name, (object,), {'__module__': module})
+            return _stub_cache[key]
+
         class _StubModule(types.ModuleType):
             """Stub for missing modules during unpickling."""
             def __getattr__(self, name):
-                return lambda *a, **k: None
+                return _make_stub(self.__name__, name)
 
         class _SafeUnpickler(pickle.Unpickler):
             def find_class(self, module, name):
+                import importlib
                 try:
-                    return super().find_class(module, name)
-                except (ModuleNotFoundError, AttributeError):
-                    # Create stub and register it
-                    parts = module.split('.')
-                    for i in range(len(parts)):
-                        mod_name = '.'.join(parts[:i+1])
-                        if mod_name not in sys.modules:
-                            sys.modules[mod_name] = _StubModule(mod_name)
-                    try:
-                        return super().find_class(module, name)
-                    except Exception:
-                        return object
+                    mod = importlib.import_module(module)
+                    return getattr(mod, name)
+                except Exception:
+                    return _make_stub(module, name)
 
         with open(agent_path, "rb") as f:
             agent = _SafeUnpickler(f).load()
-        with open(weights_path, "rb") as f:
-            agent.weights = pickle.load(f)
-        agent.np_to_list()
+        if weights_path:
+            with open(weights_path, "rb") as f:
+                agent.weights = pickle.load(f)
+        # Convert numpy weight arrays to Python lists for faster indexing
+        if callable(getattr(agent, 'np_to_list', None)):
+            agent.np_to_list()
+        elif isinstance(getattr(agent, 'weights', None), (list, tuple)):
+            agent.weights = [
+                w.tolist() if hasattr(w, 'tolist') else w
+                for w in agent.weights
+            ]
+        # Override the stubbed features function with our embedded implementation
+        agent.features = _f_6
         return agent
 
     def _evaluate(self, log2_board: np.ndarray) -> float:

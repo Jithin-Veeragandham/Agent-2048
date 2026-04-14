@@ -34,38 +34,32 @@ AGENTS = {
         "file": "expectimax_snake_runs.jsonl",
         "color": "#2ecc71",
         "short": "Expectimax\nSnake",
-        "run_id": "20746c9b-5ff",
+        "run_id": None,
     },
     "MCTS": {
         "file": "mcts_runs.jsonl",
         "color": "#9b59b6",
         "short": "MCTS",
-        "run_id": "17602ce1-5bc",
+        "run_id": None,
     },
     "PPO": {
         "file": "PPO_runs.jsonl",
         "color": "#e74c3c",
         "short": "PPO",
-        "run_id": "aee9fc06-16d",
+        "run_id": None,
     },
     "BeamSearch": {
         "file": "beam_search_runs.jsonl",
         "color": "#e67e22",
         "short": "Beam\nSearch",
-        "run_id": "d2b82f14-d47",
+        "run_id": None,
     },
     "NTuple": {
         "file": "ntuple_agent_runs.jsonl",
         "color": "#1abc9c",
-        "short": "NTuple",
-        "run_id": "eeb816ca-32d",
-    }, 
-    #"DQN": {
-   #     "file": "dqn_4x4_runs.jsonl",
-    #    "color": "#3498db",
-     #   "short": "DQN",
-      #  "run_id": "d6f6f6a5-963",
-    #},
+        "short": "N-Tuple\nTD",
+        "run_id": None,
+    },
 }
 
 REWARD_COMPONENTS = [
