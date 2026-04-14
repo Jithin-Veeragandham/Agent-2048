@@ -106,7 +106,7 @@ class AgentState:
 
 # ─── Worker process entry point ───────────────────────────────────
 
-def agent_worker(agent, config, queue: mp.Queue, stop_event: mp.Event):
+def agent_worker(agent, config, queue: mp.Queue, stop_event: mp.Event, start_event: mp.Event = None):
     """Run one complete game and stream state updates into `queue`.
 
     Runs in a separate process — no GIL sharing with other agents.
@@ -118,6 +118,9 @@ def agent_worker(agent, config, queue: mp.Queue, stop_event: mp.Event):
     import numpy as np
     from game.engine import Game2048
     from framework.evaluation import REWARD_SEARCH
+
+    if start_event is not None:
+        start_event.wait()   # block until main process signals S
 
     game = Game2048(config)
     agent.on_episode_start()
@@ -218,6 +221,49 @@ def draw_panel(surface, state: AgentState, rect: pygame.Rect, fonts):
 
 # ─── Main entry point ─────────────────────────────────────────────
 
+def _draw_multi_start_screen(screen, agents, fonts, win_w, win_h):
+    """Render a start screen listing all agents. Blocks until S is pressed."""
+    bg    = (250, 248, 239)
+    dark  = (119, 110, 101)
+    muted = (143, 122, 102)
+
+    font_big   = pygame.font.Font(None, 80)
+    font_med   = pygame.font.Font(None, 38)
+    font_small = pygame.font.Font(None, 26)
+
+    screen.fill(bg)
+    screen.blit(
+        font_big.render('2048 — Agent Race', True, dark),
+        font_big.render('2048 — Agent Race', True, dark).get_rect(center=(win_w // 2, 80))
+    )
+
+    for i, agent in enumerate(agents):
+        txt = font_small.render(f"  {i + 1}.  {agent.name}", True, dark)
+        screen.blit(txt, txt.get_rect(center=(win_w // 2, 160 + i * 30)))
+
+    screen.blit(
+        font_med.render('Press  S  to Start', True, dark),
+        font_med.render('Press  S  to Start', True, dark).get_rect(center=(win_w // 2, win_h - 80))
+    )
+    screen.blit(
+        font_small.render('Q = quit', True, muted),
+        font_small.render('Q = quit', True, muted).get_rect(center=(win_w // 2, win_h - 40))
+    )
+    pygame.display.flip()
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_q:
+                    pygame.quit()
+                    sys.exit()
+                elif event.key == pygame.K_s:
+                    return
+
+
 def run_multi_visual(agents, config):
     """Launch agents as separate processes and render them in one window."""
     pygame.init()
@@ -252,19 +298,26 @@ def run_multi_visual(agents, config):
             panel_w, panel_h,
         ))
 
-    # One queue + stop event per agent
-    queues     = [mp.Queue(maxsize=4) for _ in agents]
-    stop_event = mp.Event()
+    # Pre-spawn all processes — they load weights then wait for start_event
+    queues      = [mp.Queue(maxsize=4) for _ in agents]
+    stop_event  = mp.Event()
+    start_event = mp.Event()
 
     processes = []
     for agent, queue in zip(agents, queues):
         p = mp.Process(
             target=agent_worker,
-            args=(agent, config, queue, stop_event),
+            args=(agent, config, queue, stop_event, start_event),
             daemon=True,
         )
         p.start()
         processes.append(p)
+
+    # Show start screen while processes are loading in background
+    _draw_multi_start_screen(screen, agents, fonts, win_w, win_h)
+
+    # S was pressed — release all workers simultaneously
+    start_event.set()
 
     print("Running — Q to quit early\n")
 

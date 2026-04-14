@@ -17,6 +17,7 @@ Usage::
     python visualization/agent_viewer.py --agent random
 
 Controls:
+    S      — start / restart
     SPACE  — pause / resume
     R      — reset to a new game
     Q      — quit
@@ -49,13 +50,53 @@ AGENT_REGISTRY = {
 }
 
 
+# ─── Start screen ─────────────────────────────────────────────────
+
+def _draw_start_screen(screen, agent):
+    """Render a start screen with agent info. Returns once drawn."""
+    w, h = screen.get_size()
+    bg      = (250, 248, 239)
+    dark    = (119, 110, 101)
+    accent  = (143, 122, 102)
+    screen.fill(bg)
+
+    font_big   = pygame.font.Font(None, 96)
+    font_med   = pygame.font.Font(None, 42)
+    font_small = pygame.font.Font(None, 28)
+
+    screen.blit(
+        font_big.render('2048', True, dark),
+        font_big.render('2048', True, dark).get_rect(center=(w // 2, h // 2 - 130))
+    )
+    screen.blit(
+        font_med.render(agent.name, True, accent),
+        font_med.render(agent.name, True, accent).get_rect(center=(w // 2, h // 2 - 75))
+    )
+
+    params = agent.get_params()
+    info_lines = [f"{k}: {v}" for k, v in list(params.items())[:3]]
+    for i, line in enumerate(info_lines):
+        txt = font_small.render(line, True, dark)
+        screen.blit(txt, txt.get_rect(center=(w // 2, h // 2 - 10 + i * 28)))
+
+    screen.blit(
+        font_med.render('Press  S  to Start', True, dark),
+        font_med.render('Press  S  to Start', True, dark).get_rect(center=(w // 2, h // 2 + 100))
+    )
+    screen.blit(
+        font_small.render('SPACE = pause   R = restart   Q = quit', True, accent),
+        font_small.render('SPACE = pause   R = restart   Q = quit', True, accent).get_rect(center=(w // 2, h // 2 + 140))
+    )
+    pygame.display.flip()
+
+
 # ─── Core visual loop ─────────────────────────────────────────────
 
 def run_agent_visual(agent, config=None, step_delay_ms=300):
     """Drive Game2048Visual with any BaseAgent.
 
-    Runs the pygame window until the user presses Q or closes it.
-    The agent plays automatically; the user can pause, reset, or quit.
+    Shows a start screen first; the agent begins playing when S is pressed.
+    The user can pause, reset, or quit at any time.
 
     Args:
         agent:          Any BaseAgent instance.
@@ -67,72 +108,72 @@ def run_agent_visual(agent, config=None, step_delay_ms=300):
 
     game = Game2048(config)
     visual = Game2048Visual(game, config)
+    pygame.display.set_caption(f'2048 — {agent.name}')
     reward_fn = REWARD_SEARCH
     clock = pygame.time.Clock()
 
     move_number = 0
-    paused = False
-    running = True
+    state = 'start'   # 'start' | 'playing' | 'paused' | 'gameover'
 
-    agent.on_episode_start()
-    visual.draw()
+    _draw_start_screen(visual.screen, agent)
 
-    while running:
-        # ── Event handling ──────────────────────────────────────
+    while True:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                running = False
+                visual.close()
+                return
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_q:
-                    running = False
-                elif event.key == pygame.K_r:
+                    visual.close()
+                    return
+                elif event.key == pygame.K_s:
                     game.reset()
                     agent.on_episode_start()
                     move_number = 0
-                    paused = False
+                    state = 'playing'
                     visual.draw()
-                elif event.key == pygame.K_SPACE:
-                    paused = not paused
-                    status = "PAUSED" if paused else "RESUMED"
-                    print(f"[{status}]  Score: {game.get_score()}")
-
-        if not running:
-            break
+                elif event.key == pygame.K_r and state != 'start':
+                    game.reset()
+                    agent.on_episode_start()
+                    move_number = 0
+                    state = 'playing'
+                    visual.draw()
+                elif event.key == pygame.K_SPACE and state in ('playing', 'paused'):
+                    state = 'paused' if state == 'playing' else 'playing'
+                    print(f"[{'PAUSED' if state == 'paused' else 'RESUMED'}]  Score: {game.get_score()}")
 
         # ── Agent step ──────────────────────────────────────────
-        if not paused and not game.is_game_over():
-            available = game.get_available_moves()
-            if available:
-                state = game.get_state()
-                game_context = {
-                    'game': game,
-                    'score': game.get_score(),
-                    'move_number': move_number,
-                    'reward_fn': reward_fn,
-                }
-                action = agent.choose_action(state, available, game_context)
-                valid, reward = game.move(action)
-
-                if valid:
-                    next_state = game.get_state()
-                    done = game.is_game_over()
-                    agent.on_move_result(state, action, reward, next_state, done)
-                    move_number += 1
-
+        if state == 'playing':
+            if game.is_game_over():
+                state = 'gameover'
+                board = game.get_state()
+                agent.on_episode_end(board, game.get_score())
                 visual.draw()
-                pygame.time.delay(step_delay_ms)
+                print(f"\nGame over — Score: {game.get_score():,}  |  Moves: {move_number}")
+            else:
+                available = game.get_available_moves()
+                if available:
+                    board = game.get_state()
+                    game_context = {
+                        'game': game,
+                        'score': game.get_score(),
+                        'move_number': move_number,
+                        'reward_fn': reward_fn,
+                    }
+                    action = agent.choose_action(board, available, game_context)
+                    valid, reward = game.move(action)
+                    if valid:
+                        next_state = game.get_state()
+                        done = game.is_game_over()
+                        agent.on_move_result(board, action, reward, next_state, done)
+                        move_number += 1
+                    visual.draw()
+                    pygame.time.delay(step_delay_ms)
 
-        elif game.is_game_over():
-            # Keep rendering the game-over overlay; wait for R or Q
-            visual.draw()
+        elif state == 'gameover':
             pygame.time.delay(100)
 
         clock.tick(60)
-
-    final_state = game.get_state()
-    agent.on_episode_end(final_state, game.get_score())
-    visual.close()
-    print(f"\nFinal score: {game.get_score()}  |  Moves: {move_number}")
 
 
 # ─── Agent factory ────────────────────────────────────────────────

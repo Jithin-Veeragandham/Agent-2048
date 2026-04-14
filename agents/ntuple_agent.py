@@ -3,8 +3,6 @@
 agents/ntuple_agent.py
 ======================
 Fully self-contained N-Tuple TD agent -- no external dependencies.
-All required game logic from abachurin/2048 is embedded directly in
-this file so it runs on any machine without PYTHONPATH setup.
 
 Architecture
 ------------
@@ -63,8 +61,7 @@ from agents.base import BaseAgent
 
 
 # ================================================================
-#  N-TUPLE FEATURE EXTRACTION  (from abachurin/2048 r_learning.py)
-#  Copied here so no external package is needed at runtime.
+#  N-TUPLE FEATURE EXTRACTION
 #
 #  f_6 returns 33 feature indices, one per weight table:
 #    indices  0-16  → 17 four-tile features  (16^4 = 65536 entries)
@@ -109,8 +106,7 @@ def _f_6(x: np.ndarray) -> np.ndarray:
 
 
 # ================================================================
-#  EMBEDDED GAME LOGIC (from abachurin/2048)
-#  Included here so no external repo or PYTHONPATH is needed.
+#  GAME LOGIC
 # ================================================================
 
 def _create_move_table():
@@ -211,10 +207,7 @@ def _actual_to_log2(board: np.ndarray) -> np.ndarray:
 # ================================================================
 
 class NTupleAgent(BaseAgent):
-    """Tabular QAgent (n-tuple TD learning) wrapped as a BaseAgent.
-
-    Fully self-contained -- all game logic is embedded in this file.
-    No external repo or PYTHONPATH setup needed on any machine.
+    """N-tuple TD learning agent wrapped as a BaseAgent.
 
     Loads a trained checkpoint and runs greedy inference using the
     learned value function. No neural network -- value is computed as
@@ -242,9 +235,6 @@ class NTupleAgent(BaseAgent):
         self.agent_path   = agent_path
         self.weights_path = weights_path
 
-        # Load agent shell and weights
-        # The pkl was saved with game2048 module -- we patch sys.modules
-        # so pickle can deserialize without the external repo.
         self._agent = self._load_agent(agent_path, weights_path)
 
         self._n           = self._agent.n
@@ -261,7 +251,7 @@ class NTupleAgent(BaseAgent):
         )
 
     def _load_agent(self, agent_path: str, weights_path: str):
-        """Load QAgent, trying multiple strategies to handle module deps."""
+        """Load agent checkpoint, trying multiple strategies to handle module deps."""
 
         # Strategy 1: try loading directly (works if game2048 is on path)
         try:

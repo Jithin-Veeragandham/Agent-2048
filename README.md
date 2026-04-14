@@ -1,6 +1,6 @@
 # 2048 AI Research Platform
 
-A research platform for benchmarking AI search and reinforcement learning algorithms on the 2048 game. The project compares four algorithm families — **Beam Search**, **MCTS**, **Expectimax**, **AlphaZero**, and **PPO** — across win rate, average score, and compute cost, to evaluate the trade-off between search quality and inference time.
+A research platform for benchmarking AI search and reinforcement learning algorithms on the 2048 game. The project compares five algorithm families — **Beam Search**, **MCTS**, **Expectimax**, **PPO**, **DQN**, **NTuple TD**, and **AlphaZero** — across win rate, average score, and compute cost, to evaluate the trade-off between search quality and inference time.
 
 **Input:** a 4×4 board state and a set of valid moves.  
 **Output:** a chosen action, a structured game record (score, tile distribution, per-move reward breakdown), and evaluation plots.
@@ -25,7 +25,9 @@ Each algorithm is a self-contained agent that plugs into a shared harness (`Inte
 │   ├── expectimax.py           # Expectimax search
 │   ├── expectimax_snake.py     # Expectimax with snake-pattern heuristic
 │   ├── alphazero.py            # AlphaZero (MCTS + neural network)
-│   └── ppo2048.py              # PPO (policy gradient)
+│   ├── ppo2048.py              # PPO (policy gradient)
+│   ├── dqn_agent.py            # DQN (4×4 and 6×6 variants)
+│   └── ntuple_agent.py         # N-Tuple TD agent (pretrained weights)
 │
 ├── framework/                  # Experiment harness + evaluation
 │   ├── __init__.py
@@ -135,17 +137,22 @@ python game/engine.py             # play with arrow keys / WASD
 
 ## Results
 
-Performance across 100 games per agent (except AlphaZero — still training):
+Performance across 100 games per agent:
 
-| Agent | Avg Score | Win Rate (2048+) | Best Tile |
-|---|---|---|---|
-| ExpectimaxSnake (d=2) | 68,770 | 93% | 8192 |
-| PPO | 37,799 | 82% | 4096 |
-| MCTS (n=300, d=15) | 26,629 | 66% | 4096 |
-| BeamSearch (w=10, d=15) | 26,429 | 67% | 2048 |
-| AlphaZero | — | — | — |
+| Agent | Avg Score | 2048+ | 4096+ | 8192+ | Peak Score |
+|---|---|---|---|---|---|
+| DQN-6x6 ‡ | 89,664 | 97% | 81% | 30% | 177,332 |
+| NTuple TD | 75,968 | 95% | 79% | 21% | 156,288 |
+| ExpectimaxSnake (d=2) | 63,931 | 98% | 71% | 8% | 147,508 |
+| PPO | 37,937 | 77% | 35% | 0% | 78,864 |
+| MCTS (n=300) | 26,442 | 69% | 2% | 0% | 59,756 |
+| BeamSearch (w=15, d=20) | 25,564 | 60% | 6% | 0% | 60,484 |
+| DQN-4x4 | 10,278 | 3% | 0% | 0% | 27,200 |
+| AlphaZero | — | — | — | — | — |
 
-AlphaZero is excluded — the checkpoint in `checkpoints/` represents an early training run (62 episodes) and is not representative. Competitive performance requires significantly more self-play. See the [AlphaZero section](#alphazero) for context.
+‡ DQN-6x6 plays on a 6×6 board and is not directly comparable to the 4×4 agents.
+
+AlphaZero is excluded — the checkpoint represents an early training run (62 episodes) and is not representative. Competitive performance requires significantly more self-play.
 
 ---
 
@@ -425,19 +432,21 @@ python visualization/agent_viewer.py --agent expectimax_snake --search-depth 2
 python visualization/agent_viewer.py --agent random
 ```
 
-**Controls:** `SPACE` pause/resume · `R` reset · `Q` quit
+**Controls:** `S` start/restart · `SPACE` pause/resume · `R` reset · `Q` quit
 
-Available `--agent` values: `beam_search`, `mcts`, `expectimax`, `expectimax_snake`, `random`
+Available `--agent` values: `beam_search`, `mcts`, `expectimax`, `expectimax_snake`, `ntuple`, `random`
 
 ### All agents side by side
 
-Watch all agents race simultaneously in a single tiled window. Each agent runs in its own thread at its natural speed — the compute/quality trade-off between Random (instant) and MCTS (simulation-heavy) is immediately visible:
+Watch all agents race simultaneously in a single tiled window. Each agent runs in its own process at its natural speed — the compute/quality trade-off between Random (instant) and MCTS (simulation-heavy) is immediately visible. All agent weights are loaded in the background while the start screen is shown.
 
 ```bash
 python visualization/multi_viewer.py
 ```
 
-The window closes automatically once all games finish, or press `Q` to exit early. Final results are printed to the terminal:
+**Controls:** `S` start · `Q` quit early
+
+The window closes automatically once all games finish. Final results are printed to the terminal:
 
 ```
 Agent                          Score     Moves  Status
